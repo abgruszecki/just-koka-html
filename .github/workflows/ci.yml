@@ -12,10 +12,20 @@ jobs:
       - name: Checkout (with submodules)
         uses: actions/checkout@v4
         with:
+          fetch-depth: 2
           submodules: recursive
 
+      - name: Add ~/koka/bin to PATH
+        shell: bash
+        run: |
+          mkdir -p "$HOME/koka"
+          echo "$HOME/koka/bin" >> "$GITHUB_PATH"
+
       - name: Install Koka
-        run: curl -sSL https://github.com/koka-lang/koka/releases/latest/download/install.sh | sh
+        run: |
+          sudo apt update
+          curl -sSL -o /tmp/install.sh https://github.com/koka-lang/koka/releases/latest/download/install.sh
+          bash /tmp/install.sh -p "$HOME/koka"
 
       - name: Smoke test
         run: python3 tools/run_tests.py
