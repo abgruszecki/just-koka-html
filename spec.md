@@ -320,6 +320,6 @@ Guiding principles:
 ## Current Status (2025-12-22)
 
 - M0: implemented (smoke test + minimal modules).
-- Tokenizer: passes the currently allowlisted tokenizer subset (6444/6810 = 94.6%) (includes non-`Data` `initialStates` + `lastStartTag`, spec-like rawtext/RCDATA/script end-tag recognition, a proper comment state machine (fixes `<!-->`/`--!>` edge cases), and a corrected named-entities table generator that preserves non-BMP codepoints while escaping “unsafe” bidi controls).
+- Tokenizer: passes the currently allowlisted tokenizer subset (6591/6810 = 96.8%) (includes non-`Data` `initialStates` + `lastStartTag`, spec-like rawtext/RCDATA/script end-tag recognition, a proper comment state machine (fixes `<!-->`/`--!>` edge cases), and a corrected named-entities table generator that preserves non-BMP codepoints while escaping “unsafe” bidi controls).
 - Tree construction: minimal insertion-mode slice for wrapper synthesis (auto `<html>/<head>/<body>`), plus basic in-body `p`-closing on block starts, tokenizer auto-switching for rawtext/RCDATA/script/plaintext elements, namespace-aware element creation + basic attribute prefix mapping (`xlink:`/`xml:`/`xmlns:`), template nodes (with `content`), EOF error counting, and stray end-tag error counting; allowlists currently `383/1590` (doc) and `24/192` (frag).
 - Not implemented yet (high-level): full HTML5 treebuilder insertion modes + adoption agency + tables, foreign content/templates, error locations/codes, encoding + byte input.

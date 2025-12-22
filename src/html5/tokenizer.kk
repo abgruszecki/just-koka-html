@@ -556,6 +556,9 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
           state := SEndTagOpen
         elif c == '!' then
           state := SMarkupDeclOpen
+        elif c == '?' then
+          // Bogus comment (e.g. "<?...").
+          { comment-acc := Nil; state := SBogusComment; reconsume(SBogusComment) }
         elif is-ascii-alpha(c) then
           cur-is-end := False
           cur-name := Cons(lower-ascii(c), Nil)
