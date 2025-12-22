@@ -39,6 +39,20 @@ type st {
   SScriptDataLessThanSign
   SScriptDataEndTagOpen
   SScriptDataEndTagName
+  SScriptDataEscapeStart
+  SScriptDataEscapeStartDash
+  SScriptDataEscaped
+  SScriptDataEscapedDash
+  SScriptDataEscapedDashDash
+  SScriptDataEscapedLessThanSign
+  SScriptDataEscapedEndTagOpen
+  SScriptDataEscapedEndTagName
+  SScriptDataDoubleEscapeStart
+  SScriptDataDoubleEscaped
+  SScriptDataDoubleEscapedDash
+  SScriptDataDoubleEscapedDashDash
+  SScriptDataDoubleEscapedLessThanSign
+  SScriptDataDoubleEscapeEnd
   SPlaintext
   SCDataSection
   STagOpen
@@ -475,7 +489,7 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
         if is-ascii-alpha(c) then
           { temp-buffer := Cons(lower-ascii(c), Nil); cur-name := Cons(lower-ascii(c), Nil); cur-is-end := True; state := SRCDATAEndTagName }
         else
-          { text-acc := Cons('/', text-acc); text-acc := Cons('<', text-acc); reconsume(SRCDATA) }
+          { text-acc := Cons('<', text-acc); text-acc := Cons('/', text-acc); reconsume(SRCDATA) }
       SRCDATAEndTagName ->
         if is-ascii-alnum(c) then
           { temp-buffer := Cons(lower-ascii(c), temp-buffer); cur-name := Cons(lower-ascii(c), cur-name) }
@@ -501,7 +515,7 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
         if is-ascii-alpha(c) then
           { temp-buffer := Cons(lower-ascii(c), Nil); cur-name := Cons(lower-ascii(c), Nil); cur-is-end := True; state := SRAWTEXTEndTagName }
         else
-          { text-acc := Cons('/', text-acc); text-acc := Cons('<', text-acc); reconsume(SRAWTEXT) }
+          { text-acc := Cons('<', text-acc); text-acc := Cons('/', text-acc); reconsume(SRAWTEXT) }
       SRAWTEXTEndTagName ->
         if is-ascii-alnum(c) then
           { temp-buffer := Cons(lower-ascii(c), temp-buffer); cur-name := Cons(lower-ascii(c), cur-name) }
@@ -520,13 +534,15 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
       SScriptDataLessThanSign ->
         if c == '/' then
           { temp-buffer := Nil; cur-is-end := True; cur-name := Nil; state := SScriptDataEndTagOpen }
+        elif c == '!' then
+          { text-acc := Cons('<', text-acc); text-acc := Cons('!', text-acc); state := SScriptDataEscapeStart }
         else
           { text-acc := Cons('<', text-acc); reconsume(SScriptData) }
       SScriptDataEndTagOpen ->
         if is-ascii-alpha(c) then
           { temp-buffer := Cons(lower-ascii(c), Nil); cur-name := Cons(lower-ascii(c), Nil); cur-is-end := True; state := SScriptDataEndTagName }
         else
-          { text-acc := Cons('/', text-acc); text-acc := Cons('<', text-acc); reconsume(SScriptData) }
+          { text-acc := Cons('<', text-acc); text-acc := Cons('/', text-acc); reconsume(SScriptData) }
       SScriptDataEndTagName ->
         if is-ascii-alnum(c) then
           { temp-buffer := Cons(lower-ascii(c), temp-buffer); cur-name := Cons(lower-ascii(c), cur-name) }
@@ -542,6 +558,122 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
             { emit-temp-as-text(); reconsume(SScriptData) }
         else
           { emit-temp-as-text(); reconsume(SScriptData) }
+      SScriptDataEscapeStart ->
+        if c == '-' then
+          { text-acc := Cons('-', text-acc); state := SScriptDataEscapeStartDash }
+        else
+          reconsume(SScriptData)
+      SScriptDataEscapeStartDash ->
+        if c == '-' then
+          { text-acc := Cons('-', text-acc); state := SScriptDataEscapedDashDash }
+        else
+          reconsume(SScriptData)
+      SScriptDataEscaped ->
+        if c == '-' then
+          { text-acc := Cons('-', text-acc); state := SScriptDataEscapedDash }
+        elif c == '<' then
+          state := SScriptDataEscapedLessThanSign
+        else
+          text-acc := Cons(repl-nul(c), text-acc)
+      SScriptDataEscapedDash ->
+        if c == '-' then
+          { text-acc := Cons('-', text-acc); state := SScriptDataEscapedDashDash }
+        elif c == '<' then
+          state := SScriptDataEscapedLessThanSign
+        else
+          { text-acc := Cons(repl-nul(c), text-acc); state := SScriptDataEscaped }
+      SScriptDataEscapedDashDash ->
+        if c == '-' then
+          text-acc := Cons('-', text-acc)
+        elif c == '<' then
+          state := SScriptDataEscapedLessThanSign
+        elif c == '>' then
+          { text-acc := Cons('>', text-acc); state := SScriptData }
+        else
+          { text-acc := Cons(repl-nul(c), text-acc); state := SScriptDataEscaped }
+      SScriptDataEscapedLessThanSign ->
+        if c == '/' then
+          { temp-buffer := Nil; cur-is-end := True; cur-name := Nil; state := SScriptDataEscapedEndTagOpen }
+        elif is-ascii-alpha(c) then
+          // Emit "<" + c and enter the double-escape start scanner.
+          {
+            temp-buffer := Cons(lower-ascii(c), Nil)
+            text-acc := Cons('<', text-acc)
+            text-acc := Cons(repl-nul(c), text-acc)
+            state := SScriptDataDoubleEscapeStart
+          }
+        else
+          { text-acc := Cons('<', text-acc); reconsume(SScriptDataEscaped) }
+      SScriptDataEscapedEndTagOpen ->
+        if is-ascii-alpha(c) then
+          { temp-buffer := Cons(lower-ascii(c), Nil); cur-name := Cons(lower-ascii(c), Nil); cur-is-end := True; state := SScriptDataEscapedEndTagName }
+        else
+          { text-acc := Cons('<', text-acc); text-acc := Cons('/', text-acc); reconsume(SScriptDataEscaped) }
+      SScriptDataEscapedEndTagName ->
+        if is-ascii-alnum(c) then
+          { temp-buffer := Cons(lower-ascii(c), temp-buffer); cur-name := Cons(lower-ascii(c), cur-name) }
+        elif (is-ws(c) || c == '/' || c == '>') then
+          if is-appropriate-end-tag(last-start, temp-buffer) then
+            if c == '>' then
+              { emit-token(TokEndTag(string/listchar/string(temp-buffer.reverse))); temp-buffer := Nil; state := SData }
+            elif c == '/' then
+              { state := SSelfClosingStartTag }
+            else
+              { state := SBeforeAttrName }
+          else
+            { emit-temp-as-text(); reconsume(SScriptDataEscaped) }
+        else
+          { emit-temp-as-text(); reconsume(SScriptDataEscaped) }
+      SScriptDataDoubleEscapeStart ->
+        if is-ascii-alnum(c) then
+          { temp-buffer := Cons(lower-ascii(c), temp-buffer); text-acc := Cons(repl-nul(c), text-acc) }
+        elif (is-ws(c) || c == '/' || c == '>') then
+          {
+            val name = string/listchar/string(temp-buffer.reverse)
+            text-acc := Cons(repl-nul(c), text-acc)
+            state := (if name == "script" then SScriptDataDoubleEscaped else SScriptDataEscaped)
+          }
+        else
+          reconsume(SScriptDataEscaped)
+      SScriptDataDoubleEscaped ->
+        if c == '-' then
+          { text-acc := Cons('-', text-acc); state := SScriptDataDoubleEscapedDash }
+        elif c == '<' then
+          state := SScriptDataDoubleEscapedLessThanSign
+        else
+          text-acc := Cons(repl-nul(c), text-acc)
+      SScriptDataDoubleEscapedDash ->
+        if c == '-' then
+          { text-acc := Cons('-', text-acc); state := SScriptDataDoubleEscapedDashDash }
+        elif c == '<' then
+          state := SScriptDataDoubleEscapedLessThanSign
+        else
+          { text-acc := Cons(repl-nul(c), text-acc); state := SScriptDataDoubleEscaped }
+      SScriptDataDoubleEscapedDashDash ->
+        if c == '-' then
+          text-acc := Cons('-', text-acc)
+        elif c == '<' then
+          state := SScriptDataDoubleEscapedLessThanSign
+        elif c == '>' then
+          { text-acc := Cons('>', text-acc); state := SScriptData }
+        else
+          { text-acc := Cons(repl-nul(c), text-acc); state := SScriptDataDoubleEscaped }
+      SScriptDataDoubleEscapedLessThanSign ->
+        if c == '/' then
+          { temp-buffer := Nil; text-acc := Cons('<', text-acc); text-acc := Cons('/', text-acc); state := SScriptDataDoubleEscapeEnd }
+        else
+          { text-acc := Cons('<', text-acc); reconsume(SScriptDataDoubleEscaped) }
+      SScriptDataDoubleEscapeEnd ->
+        if is-ascii-alnum(c) then
+          { temp-buffer := Cons(lower-ascii(c), temp-buffer); text-acc := Cons(repl-nul(c), text-acc) }
+        elif (is-ws(c) || c == '/' || c == '>') then
+          {
+            val name = string/listchar/string(temp-buffer.reverse)
+            text-acc := Cons(repl-nul(c), text-acc)
+            state := (if name == "script" then SScriptDataEscaped else SScriptDataDoubleEscaped)
+          }
+        else
+          reconsume(SScriptDataDoubleEscaped)
       SPlaintext ->
         text-acc := Cons(repl-nul(c), text-acc)
       SCDataSection ->
