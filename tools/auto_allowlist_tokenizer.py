@@ -78,11 +78,10 @@ def main() -> int:
                 passing.append(idx)
 
         before = len(data["tokenizer"].get(fx, []))
-        if passing:
-            _, after = add_indices(data, "tokenizer", fx, passing)
-            print(f"{fx}: +{after - before} (now {after})")
-        else:
-            print(f"{fx}: +0")
+        data["tokenizer"][fx] = sorted(passing)
+        after = len(passing)
+        delta = after - before
+        print(f"{fx}: Δ{delta:+d} (now {after})")
 
     if args.write:
         save(data, allowlists_path)

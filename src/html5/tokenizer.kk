@@ -2,6 +2,7 @@ module html5/tokenizer
 
 import std/core/string
 import html5/dom
+import html5/entities
 
 pub type tokenizer-state {
   Data
@@ -45,6 +46,9 @@ fun is-ascii-alpha(c: char) : bool
 fun lower-ascii(c: char) : char
   if (c >= 'A' && c <= 'Z') then (c.int + 32).char else c
 
+fun is-ascii-alnum(c: char) : bool
+  (c >= '0' && c <= '9') || is-ascii-alpha(c)
+
 fun preprocess(input: string) : <div,exn> vector<char>
   val cs = string/vector(input)
   var out : list<char> := Nil
@@ -62,6 +66,82 @@ fun preprocess(input: string) : <div,exn> vector<char>
       i := i + 1
   })
   vector/list/vector(out.reverse)
+
+fun slice-string(cs: vector<char>, start: int, end: int) : <div,exn> string
+  // end is exclusive
+  var acc : list<char> := Nil
+  var i := start
+  while(fn(){ i < end && i < cs.length }, fn(){
+    acc := Cons(cs[i], acc)
+    i := i + 1
+  })
+  string/listchar/string(acc.reverse)
+
+fun parse-uint(cs: vector<char>, start: int, end: int, base: int) : <div,exn> int
+  var n := 0
+  var i := start
+  while(fn(){ i < end && i < cs.length }, fn(){
+    val c = cs[i]
+    val d =
+      if (c >= '0' && c <= '9') then (c.int - '0'.int)
+      elif (base == 16 && c >= 'a' && c <= 'f') then (10 + c.int - 'a'.int)
+      elif (base == 16 && c >= 'A' && c <= 'F') then (10 + c.int - 'A'.int)
+      else 0
+    n := n * base + d
+    i := i + 1
+  })
+  n
+
+fun consume-char-ref(cs: vector<char>, pos: int) : <div,exn> (consumed: int, replacement: maybe<string>)
+  // `pos` is the index of '&'.
+  val len = cs.length
+  val next = pos + 1
+  if next >= len then (1, Nothing) else
+    val c1 = cs[next]
+    if c1 == '#' then
+      // Numeric character reference.
+      val n2 = next + 1
+      if n2 >= len then (1, Nothing) else
+        val c2 = cs[n2]
+        val isHex = (c2 == 'x' || c2 == 'X')
+        val digitsStart = if isHex then (n2 + 1) else n2
+        var j := digitsStart
+        while(fn(){
+          j < len && (
+            (cs[j] >= '0' && cs[j] <= '9') ||
+            (isHex && ((cs[j] >= 'a' && cs[j] <= 'f') || (cs[j] >= 'A' && cs[j] <= 'F')))
+          )
+        }, fn(){ j := j + 1 })
+        if j == digitsStart then (1, Nothing) else
+          val hasSemi = (j < len && cs[j] == ';')
+          val end = j
+          val code = parse-uint(cs, digitsStart, end, if isHex then 16 else 10)
+          val safe = if (code <= 0 || code > 0x10FFFF) then 0xFFFD else code
+          val s = char/string(safe.char)
+          val consumed = (if hasSemi then (j - pos + 1) else (j - pos))
+          (consumed, Just(s))
+    else
+      // Named character reference: ASCII alnum only.
+      var j := next
+      while(fn(){ j < len && is-ascii-alnum(cs[j]) }, fn(){ j := j + 1 })
+      if j == next then (1, Nothing) else
+        val hasSemi = (j < len && cs[j] == ';')
+        // Prefer semicolon-terminated form.
+        if hasSemi then
+          val key = slice-string(cs, next, j + 1)
+          match entities/lookup(key)
+            Just(v) -> (j - pos + 1, Just(v))
+            Nothing -> (1, Nothing)
+        else
+          val key = slice-string(cs, next, j)
+          // Legacy (no semicolon) only if next char isn't alnum or '='.
+          val following = if j < len then cs[j] else '\u0000'
+          if (j < len && (is-ascii-alnum(following) || following == '=')) then
+            (1, Nothing)
+          else
+            match entities/lookup(key)
+              Just(v) -> (j - pos, Just(v))
+              Nothing -> (1, Nothing)
 
 // M1: a pragmatic subset tokenizer (enough to start enabling non-entity tag/text tests).
 pub fun tokenize(input: string, initial: tokenizer-state = Data, lastStartTag: maybe<string> = Nothing)
@@ -130,6 +210,12 @@ pub fun tokenize(input: string, initial: tokenizer-state = Data, lastStartTag: m
       SData ->
         if c == '<' then
           state := STagOpen
+        elif c == '&' then
+          val (consumed, repl) = consume-char-ref(cs, i)
+          match repl
+            Nothing -> text-acc := Cons('&', text-acc)
+            Just(s) -> text-acc := s.list.reverse ++ text-acc
+          i := i + consumed - 1
         else
           text-acc := Cons(c, text-acc)
       STagOpen ->
@@ -228,12 +314,24 @@ pub fun tokenize(input: string, initial: tokenizer-state = Data, lastStartTag: m
         if c == '\"' then
           finish-attr()
           state := SAfterAttrValueQ
+        elif c == '&' then
+          val (consumed, repl) = consume-char-ref(cs, i)
+          match repl
+            Nothing -> cur-attr-value := Cons('&', cur-attr-value)
+            Just(s) -> cur-attr-value := s.list.reverse ++ cur-attr-value
+          i := i + consumed - 1
         else
           cur-attr-value := Cons(c, cur-attr-value)
       SAttrValueSQ ->
         if c == '\'' then
           finish-attr()
           state := SAfterAttrValueQ
+        elif c == '&' then
+          val (consumed, repl) = consume-char-ref(cs, i)
+          match repl
+            Nothing -> cur-attr-value := Cons('&', cur-attr-value)
+            Just(s) -> cur-attr-value := s.list.reverse ++ cur-attr-value
+          i := i + consumed - 1
         else
           cur-attr-value := Cons(c, cur-attr-value)
       SAttrValueUQ ->
@@ -243,6 +341,12 @@ pub fun tokenize(input: string, initial: tokenizer-state = Data, lastStartTag: m
         elif c == '>' then
           finish-tag()
           state := SData
+        elif c == '&' then
+          val (consumed, repl) = consume-char-ref(cs, i)
+          match repl
+            Nothing -> cur-attr-value := Cons('&', cur-attr-value)
+            Just(s) -> cur-attr-value := s.list.reverse ++ cur-attr-value
+          i := i + consumed - 1
         else
           cur-attr-value := Cons(c, cur-attr-value)
       SAfterAttrValueQ ->
