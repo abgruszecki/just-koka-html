@@ -28,6 +28,8 @@ type mode {
   InHeadNoscript
   AfterHead
   InBody
+  InFrameset
+  AfterFrameset
   InTable
   InTableBody
   InColumnGroup
@@ -61,6 +63,7 @@ fun is-void-element(name: string) : bool
     "br" -> True
     "col" -> True
     "embed" -> True
+    "frame" -> True
     "hr" -> True
     "img" -> True
     "input" -> True
@@ -586,6 +589,20 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
     })
     ok
 
+  fun filter-ws(s: string) : <div,exn> string
+    val cs = string/vector(s)
+    var acc : list<char> := Nil
+    var i := 0
+    while(fn(){ i < cs.length }, fn(){
+      val c = cs[i]
+      if (c == ' ' || c == '\n' || c == '\t' || c == '\r' || c == '\u000c') then
+        acc := Cons(c, acc)
+      else
+        ()
+      i := i + 1
+    })
+    string/listchar/string(acc.reverse)
+
   fun add-error(st0: dstate) : dstate
     st(st0.stack, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors + 1)
 
@@ -800,7 +817,13 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
           TokCharacter(_) ->
             { val st1 = ensure-body(st0, Nil); (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True) }
           TokStartTag(name, attrs, _) ->
-            if name == "body" then
+            if name == "frameset" then
+              {
+                // Allow a frameset document before inserting a <body>.
+                val st1 = start-tag(st0, name, attrs, False)
+                (st(st1.stack, InFrameset, st1.html-inserted, st1.head-inserted, True, st1.errors), False)
+              }
+            elif name == "body" then
               { val st1 = ensure-body(st0, attrs); (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False) }
             else
               { val st1 = ensure-body(st0, Nil); (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True) }
@@ -813,6 +836,9 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
         match t
           TokStartTag(name, attrs, selfClosing) ->
             if name == "html" || name == "head" || name == "body" then (st0, False)
+            elif name == "frame" then
+              // Disallow <frame> in the body; ignore it.
+              (st0, False)
             else
               {
                 val ns = element-ns(st0.stack, name)
@@ -838,6 +864,53 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
             if s == "" then (st0, False) else (append(st0, TText(s)), False)
           TokComment(data) -> (append(st0, TComment(data)), False)
           TokDoctype(_,_,_,_) -> (st0, False)
+          TokEOF -> (add-eof-error(st0), False)
+      InFrameset ->
+        match t
+          TokStartTag(name, attrs, selfClosing) ->
+            if name == "frameset" then
+              (st(start-tag(st0, name, attrs, selfClosing).stack, InFrameset, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors), False)
+            elif name == "frame" then
+              (start-tag(st0, name, attrs, True), False)
+            else
+              (add-error(st0), False)
+          TokEndTag(name) ->
+            if name == "frameset" then
+              {
+                val st1 = end-tag(st0, "frameset")
+                val m = if has-open(st1.stack, "frameset") then InFrameset else AfterFrameset
+                (st(st1.stack, m, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False)
+              }
+            else
+              (add-error(st0), False)
+          TokCharacter(s) ->
+            if is-ws(s) then
+              (append(st0, TText(s)), False)
+            else
+              {
+                val ws = filter-ws(s)
+                val st1 = add-error(st0)
+                if ws == "" then (st1, False) else (append(st1, TText(ws)), False)
+              }
+          TokComment(data) -> (append(st0, TComment(data)), False)
+          TokDoctype(_,_,_,_) -> (add-error(st0), False)
+          TokEOF -> (add-eof-error(st0), False)
+      AfterFrameset ->
+        match t
+          TokCharacter(s) ->
+            if is-ws(s) then
+              (append(st0, TText(s)), False)
+            else
+              {
+                val ws = filter-ws(s)
+                val st1 = add-error(st0)
+                if ws == "" then (st1, False) else (append(st1, TText(ws)), False)
+              }
+          TokComment(data) -> (append(st0, TComment(data)), False)
+          TokEndTag(name) ->
+            if name == "html" then (st0, False) else (add-error(st0), False)
+          TokStartTag(_) -> (add-error(st0), False)
+          TokDoctype(_,_,_,_) -> (add-error(st0), False)
           TokEOF -> (add-eof-error(st0), False)
       InTable ->
         match t
