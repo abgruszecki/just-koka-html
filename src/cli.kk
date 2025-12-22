@@ -48,6 +48,7 @@ fun token-json(t: tokenizer/token) : <div,exn> string
         json/arr([json/escape-string("StartTag"), json/escape-string(name), attr-dict-json(attrs)])
     TokDoctype(name, publicId, systemId, forceQuirks) ->
       {
+        val name-json = if name.trim == "" then "null" else json/escape-string(name)
         val pub-id =
           match publicId
             Nothing -> "null"
@@ -57,7 +58,7 @@ fun token-json(t: tokenizer/token) : <div,exn> string
             Nothing -> "null"
             Just(x) -> json/escape-string(x)
         val quirks = if forceQuirks then "false" else "true"
-        json/arr([json/escape-string("DOCTYPE"), json/escape-string(name), pub-id, sys-id, quirks])
+        json/arr([json/escape-string("DOCTYPE"), name-json, pub-id, sys-id, quirks])
       }
 
 fun run-tokenizer(args: list<string>) : <console,fsys,div,exn> ()

@@ -486,6 +486,8 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
             Nothing -> text-acc := Cons('&', text-acc)
             Just(s) -> text-acc := s.list.reverse ++ text-acc
           i := i + consumed - 1
+        elif c == '\u0000' then
+          { add-err("unexpected-null-character", i); text-acc := Cons('\u0000', text-acc) }
         else
           text-acc := Cons(repl-nul(c), text-acc)
       SRCDATA ->
@@ -978,11 +980,11 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
           cur-selfclosing := False
           state := STagName
         else
-          // Invalid end tag open; treat as text.
-          add-err("invalid-end-tag-open", i)
-          text-acc := Cons('<', text-acc)
-          text-acc := Cons('/', text-acc)
-          reconsume(SData)
+          // Parse as bogus comment.
+          add-err("invalid-first-character-of-tag-name", i)
+          comment-acc := Nil
+          state := SBogusComment
+          reconsume(SBogusComment)
       STagName ->
         if c == '>' then
           { finish-tag(); state := tag-next-state }
@@ -1142,6 +1144,8 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
       { comment-acc := Cons('-', comment-acc); comment-acc := Cons('-', comment-acc); emit-token(TokComment(string/listchar/string(comment-acc.reverse))) }
     SCommentEndBang ->
       { comment-acc := Cons('-', comment-acc); comment-acc := Cons('-', comment-acc); comment-acc := Cons('!', comment-acc); emit-token(TokComment(string/listchar/string(comment-acc.reverse))) }
+    SEndTagOpen ->
+      { text-acc := Cons('<', text-acc); text-acc := Cons('/', text-acc) }
     SBogusComment -> emit-token(TokComment(string/listchar/string(comment-acc.reverse)))
     SBeforeDoctypeName -> { doctype-force := True; emit-doctype() }
     SDoctypeName -> { doctype-force := True; emit-doctype() }
