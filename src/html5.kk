@@ -1,5 +1,7 @@
 module html5
 
+import std/core/string
+
 import html5/errors
 import html5/dom
 import html5/tokenizer
@@ -20,10 +22,35 @@ pub val default-parse-options : parseoptions =
 
 pub struct parseresult(dom: dom, errors: list<parseerror>)
 
+fun is-ws-only(s: string) : <div,exn> bool
+  val cs = string/vector(s)
+  var ok := True
+  var i := 0
+  while(fn(){ ok && i < cs.length }, fn(){
+    val c = cs[i]
+    ok := (c == ' ' || c == '\n' || c == '\t' || c == '\r' || c == '\u000c')
+    i := i + 1
+  })
+  ok
+
 pub fun parse(html: string, opts: parseoptions = default-parse-options) : <div,exn> parseresult
   val (tokens, errors) = tokenizer/tokenize(html, Data)
   val dom = treebuilder/build-document(tokens)
-  Parseresult(dom, errors)
+  // Tree construction tests only check parse error *counts*; start by matching the common "missing doctype" case.
+  fun saw-leading-doctype(ts: list<tokenizer/token>) : <div,exn> bool
+    match ts
+      Nil -> False
+      Cons(t, rest) ->
+        match t
+          TokDoctype(_,_,_,_) -> True
+          TokComment(_) -> saw-leading-doctype(rest)
+          TokCharacter(s) -> if is-ws-only(s) then saw-leading-doctype(rest) else False
+          _ -> False
+
+  val errors2 =
+    if saw-leading-doctype(tokens) then errors
+    else errors ++ Cons(Parseerror("missing-doctype", 1, 1), Nil)
+  Parseresult(dom, errors2)
 
 pub fun parse-fragment(html: string, fragCtx: fragmentcontext, opts: parseoptions = default-parse-options) : <div,exn> parseresult
   val (tokens, errors) = tokenizer/tokenize(html, Data)

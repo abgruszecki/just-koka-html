@@ -2559,7 +2559,11 @@
       "search-element.dat": [],
       "tables01.dat": [],
       "template.dat": [],
-      "tests1.dat": [],
+      "tests1.dat": [
+        0,
+        1,
+        2
+      ],
       "tests10.dat": [],
       "tests11.dat": [],
       "tests12.dat": [],

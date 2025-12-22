@@ -321,5 +321,5 @@ Guiding principles:
 
 - M0: implemented (smoke test + minimal modules).
 - Tokenizer: passes the currently allowlisted tokenizer subset (2515/6810 = 36.9%).
-- Tree construction: harness not wired yet; allowlists currently `0/1590` (doc) and `0/192` (frag).
+- Tree construction: harness wired; allowlists currently `3/1590` (doc) and `0/192` (frag).
 - Not implemented yet (high-level): real HTML5 treebuilder insertion modes, foreign content/templates, error locations, encoding.

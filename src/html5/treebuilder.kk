@@ -24,6 +24,24 @@ fun close-frame(fr: frame) : tnode
     FEl(name,ns,attrs) -> TEl(name, ns, attrs, fr.children.reverse)
     _ -> TEl("#invalid", Html, Nil, fr.children.reverse)
 
+fun is-void-element(name: string) : bool
+  match name
+    "area" -> True
+    "base" -> True
+    "br" -> True
+    "col" -> True
+    "embed" -> True
+    "hr" -> True
+    "img" -> True
+    "input" -> True
+    "link" -> True
+    "meta" -> True
+    "param" -> True
+    "source" -> True
+    "track" -> True
+    "wbr" -> True
+    _ -> False
+
 fun arena-from-children(rootNode: node, children: list<tnode>) : <div> dom
   var nodesRev : list<node> := Nil
   var nextId : int := 0
@@ -67,17 +85,28 @@ fun build-tree(tokens: list<token>, initial: frame) : <div> list<tnode>
       Cons(fr, rest) -> stack := Cons(add-child(fr, child), rest)
 
   fun pop(endName: string)
-    match stack
-      Cons(top, Cons(parent, rest)) ->
-        match top.kind
-          FEl(name,_,_) ->
-            if name == endName then
-              stack := Cons(add-child(parent, close-frame(top)), rest)
-            else
-              // M2 placeholder: ignore mismatches; close one element.
-              stack := Cons(add-child(parent, close-frame(top)), rest)
-          _ -> ()
-      _ -> ()
+    fun pop-loop()
+      match stack
+        Cons(top, Cons(parent, rest)) ->
+          match top.kind
+            FEl(name,_,_) ->
+              {
+                stack := Cons(add-child(parent, close-frame(top)), rest)
+                if name == endName then () else pop-loop()
+              }
+            _ -> ()
+        _ -> ()
+    pop-loop()
+
+  fun has-open(tag: string)
+    fun go(xs: list<frame>) : bool
+      match xs
+        Nil -> False
+        Cons(fr, rest) ->
+          match fr.kind
+            FEl(name,_,_) -> if name == tag then True else go(rest)
+            _ -> go(rest)
+    go(stack)
 
   fun consume(ts: list<token>)
     match ts
@@ -85,8 +114,10 @@ fun build-tree(tokens: list<token>, initial: frame) : <div> list<tnode>
       Cons(t, rest) ->
         match t
           TokStartTag(name, attrs, selfClosing) ->
-            if selfClosing then
+            if selfClosing || is-void-element(name) then
               append(TEl(name, Html, attrs, Nil))
+            else if name == "p" && has-open("p") then
+              { pop("p"); push(FEl(name, Html, attrs)) }
             else
               push(FEl(name, Html, attrs))
           TokEndTag(name) -> pop(name)
@@ -117,9 +148,33 @@ fun build-tree(tokens: list<token>, initial: frame) : <div> list<tnode>
     _ -> Nil
 
 pub fun build-document(tokens: list<token>) : <div> dom
-  val initial = Frame(FDoc, Nil)
-  val children = build-tree(tokens, initial)
-  arena-from-children(Document(Nil, "no-quirks"), children)
+  // Minimal M2 slice:
+  // - If input includes explicit <html>/<head>/<body> tags, build directly from tokens.
+  // - Otherwise, synthesize <html><head><body> and put all content in <body>.
+  fun has-wrapper-tag(ts: list<token>) : bool
+    match ts
+      Nil -> False
+      Cons(t, rest) ->
+        match t
+          TokStartTag(name,_,_) ->
+            if (name == "html" || name == "head" || name == "body") then True else has-wrapper-tag(rest)
+          _ -> has-wrapper-tag(rest)
+
+  if has-wrapper-tag(tokens) then
+    {
+      val initial = Frame(FDoc, Nil)
+      val children = build-tree(tokens, initial)
+      arena-from-children(Document(Nil, "no-quirks"), children)
+    }
+  else
+    {
+      val bodyInitial = Frame(FEl("body", Html, Nil), Nil)
+      val bodyChildren = build-tree(tokens, bodyInitial)
+      val body = TEl("body", Html, Nil, bodyChildren)
+      val head = TEl("head", Html, Nil, Nil)
+      val html = TEl("html", Html, Nil, [head, body])
+      arena-from-children(Document(Nil, "no-quirks"), [html])
+    }
 
 pub fun build-fragment(tokens: list<token>, fragCtx: fragmentcontext) : <div> dom
   val initial = Frame(FFrag(Just(fragCtx)), Nil)

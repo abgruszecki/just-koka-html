@@ -28,6 +28,7 @@ pub alias parseerror = errors/parseerror
 type st {
   SData
   STagOpen
+  SMarkupDeclOpen
   SEndTagOpen
   STagName
   SBeforeAttrName
@@ -39,6 +40,10 @@ type st {
   SAttrValueUQ
   SAfterAttrValueQ
   SSelfClosingStartTag
+  SComment
+  SBeforeDoctypeName
+  SDoctypeName
+  SAfterDoctypeName
 }
 
 fun is-ascii-alpha(c: char) : bool
@@ -49,6 +54,19 @@ fun lower-ascii(c: char) : char
 
 fun is-ascii-alnum(c: char) : bool
   (c >= '0' && c <= '9') || is-ascii-alpha(c)
+
+fun starts-with-ci(cs: vector<char>, start: int, pat: string) : <div,exn> bool
+  val ps = string/vector(pat)
+  if start + ps.length > cs.length then False else
+    {
+      var ok := True
+      var i := 0
+      while(fn(){ ok && i < ps.length }, fn(){
+        ok := (lower-ascii(cs[start + i]) == lower-ascii(ps[i]))
+        i := i + 1
+      })
+      ok
+    }
 
 fun preprocess(input: string) : <div,exn> vector<char>
   val cs = string/vector(input)
@@ -161,6 +179,8 @@ pub fun tokenize(input: string, initial: tokenizer-state = Data, lastStartTag: m
   // Output
   var out : list<token> := Nil
   var text-acc : list<char> := Nil
+  var comment-acc : list<char> := Nil
+  var doctype-name : list<char> := Nil
   fun flush-text()
     if text-acc != Nil then
       out := Cons(TokCharacter(string/listchar/string(text-acc.reverse)), out)
@@ -224,6 +244,8 @@ pub fun tokenize(input: string, initial: tokenizer-state = Data, lastStartTag: m
           cur-is-end := True
           cur-name := Nil
           state := SEndTagOpen
+        elif c == '!' then
+          state := SMarkupDeclOpen
         elif is-ascii-alpha(c) then
           cur-is-end := False
           cur-name := Cons(lower-ascii(c), Nil)
@@ -234,6 +256,52 @@ pub fun tokenize(input: string, initial: tokenizer-state = Data, lastStartTag: m
           // Not a tag; emit '<' and reconsume.
           text-acc := Cons('<', text-acc)
           reconsume(SData)
+      SMarkupDeclOpen ->
+        if (c == '-' && i + 2 < cs.length && cs[i + 1] == '-' ) then
+          // Consume "<!--"
+          comment-acc := Nil
+          state := SComment
+          i := i + 1
+        elif starts-with-ci(cs, i, "DOCTYPE") then
+          // Consume "<!DOCTYPE"
+          doctype-name := Nil
+          state := SBeforeDoctypeName
+          i := i + 6
+        else
+          // Not a known declaration; emit "<!" and reconsume.
+          text-acc := Cons('!', text-acc)
+          text-acc := Cons('<', text-acc)
+          reconsume(SData)
+      SComment ->
+        if (c == '-' && i + 2 < cs.length && cs[i + 1] == '-' && cs[i + 2] == '>') then
+          emit-token(TokComment(string/listchar/string(comment-acc.reverse)))
+          state := SData
+          i := i + 2
+        else
+          comment-acc := Cons(c, comment-acc)
+      SBeforeDoctypeName ->
+        if c == ' ' || c == '\n' || c == '\t' || c == '\r' then
+          ()
+        elif c == '>' then
+          emit-token(TokDoctype("", Nothing, Nothing, False))
+          state := SData
+        else
+          doctype-name := Cons(lower-ascii(c), Nil)
+          state := SDoctypeName
+      SDoctypeName ->
+        if c == '>' then
+          emit-token(TokDoctype(string/listchar/string(doctype-name.reverse), Nothing, Nothing, False))
+          state := SData
+        elif c == ' ' || c == '\n' || c == '\t' || c == '\r' then
+          state := SAfterDoctypeName
+        else
+          doctype-name := Cons(lower-ascii(c), doctype-name)
+      SAfterDoctypeName ->
+        if c == '>' then
+          emit-token(TokDoctype(string/listchar/string(doctype-name.reverse), Nothing, Nothing, False))
+          state := SData
+        else
+          ()
       SEndTagOpen ->
         if is-ascii-alpha(c) then
           cur-name := Cons(lower-ascii(c), Nil)

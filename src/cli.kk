@@ -7,6 +7,7 @@ import std/os/readline
 import std/core/string
 import std/core/int
 
+import html5
 import html5/json
 import html5/base64
 import html5/tokenizer
@@ -106,6 +107,84 @@ fun run-tokenizer-batch() : <console,div,exn> ()
 
   json/arr(go(0, Nil)).println
 
+fun has-prefix(s: string, pre: string) : <div,exn> bool
+  val sv = string/vector(s)
+  val pv = string/vector(pre)
+  if pv.length > sv.length then False else
+    {
+      var ok := True
+      var i := 0
+      while(fn(){ ok && i < pv.length }, fn(){
+        ok := (sv[i] == pv[i])
+        i := i + 1
+      })
+      ok
+    }
+
+fun drop-chars(s: string, n: int) : <div,exn> string
+  val cs = string/vector(s)
+  var acc : list<char> := Nil
+  var i := n
+  while(fn(){ i < cs.length }, fn(){
+    acc := Cons(cs[i], acc)
+    i := i + 1
+  })
+  string/listchar/string(acc.reverse)
+
+fun parsefragmentcontext(s: string) : <div,exn> fragmentcontext
+  if has-prefix(s, "svg ") then
+    Fragmentcontext(drop-chars(s, 4), Svg)
+  elif has-prefix(s, "math ") then
+    Fragmentcontext(drop-chars(s, 5), Math)
+  else
+    Fragmentcontext(s, Html)
+
+fun tree-case-json(dump: string, errCount: int) : <div,exn> string
+  // Output shape: [ "<tree dump>", <error_count> ]
+  json/arr([json/escape-string(dump), int/show(errCount)])
+
+fun run-tree-batch() : <console,div,exn> ()
+  // stdin protocol:
+  // - First line: integer N
+  // - Per case:
+  //   - Header line: "<kind>\t<contextOr->\t<script(on|off|-)>\t<base64_char_len>"
+  //   - Followed by as many base64 chunk lines (<= ~900 chars) as needed
+  // Where:
+  //   - kind: "doc" | "frag"
+  //   - context: for frag, same string as in html5lib .dat (#document-fragment)
+  val n = readline().trim.parse-int.default(0)
+
+  fun read-b64(remaining: int, acc: list<string>) : <console,div,exn> list<string>
+    if remaining <= 0 then acc else
+      val chunk = readline()
+      read-b64(remaining - chunk.count, Cons(chunk, acc))
+
+  fun go(i: int, outs: list<string>) : <console,div,exn> list<string>
+    if i >= n then outs.reverse else
+      val header = readline()
+      val parts = string/sep/split(header, "\t")
+      match parts
+        Cons(kind, Cons(ctxStr, Cons(_script, Cons(lenStr, _rest)))) ->
+          {
+            val b64len = lenStr.trim.parse-int.default(-1)
+            if b64len < 0 then exn/throw("invalid base64 length")
+            val chunks = read-b64(b64len, Nil)
+            val b64 = chunks.reverse.join("")
+            if b64.count != b64len then exn/throw("base64 length mismatch")
+            val input = base64/decode-utf8(b64)
+            val res =
+              if kind == "frag" then
+                html5/parse-fragment(input, parsefragmentcontext(ctxStr))
+              else
+                html5/parse(input)
+            val dump = html5/to-test-format(res.dom)
+            val out = tree-case-json(dump, res.errors.length)
+            go(i + 1, Cons(out, outs))
+          }
+        _ -> exn/throw("invalid batch line (expected 4 tab-separated fields)")
+
+  json/arr(go(0, Nil)).println
+
 pub fun main()
   val args = get-args()
   match args
@@ -113,5 +192,6 @@ pub fun main()
       match cmd
         "tokenizer" -> run-tokenizer(Cons(cmd, rest))
         "tokenizer-batch" -> run-tokenizer-batch()
-        _ -> "usage: cli tokenizer <state> <lastStartTagOr-> <inputPath> | cli tokenizer-batch".println
-    _ -> "usage: cli tokenizer <state> <lastStartTagOr-> <inputPath> | cli tokenizer-batch".println
+        "tree-batch" -> run-tree-batch()
+        _ -> "usage: cli tokenizer <state> <lastStartTagOr-> <inputPath> | cli tokenizer-batch | cli tree-batch".println
+    _ -> "usage: cli tokenizer <state> <lastStartTagOr-> <inputPath> | cli tokenizer-batch | cli tree-batch".println
