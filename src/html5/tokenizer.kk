@@ -282,7 +282,7 @@ pub fun tokenize(input: string, initial: tokenizer-state = Data, lastStartTag: m
     cur-selfclosing := False
 
   fun emit-doctype()
-    val name = string/listchar/string(doctype-name.reverse)
+    val name = string/listchar/string(doctype-name.reverse).trim
     emit-token(TokDoctype(name, doctype-public, doctype-system, doctype-force))
     doctype-name := Nil
     doctype-public := Nothing
