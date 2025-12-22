@@ -27,6 +27,11 @@ type mode {
   InHead
   AfterHead
   InBody
+  InTable
+  InTableBody
+  InColumnGroup
+  InRow
+  InCell
   AfterBody
 }
 
@@ -566,6 +571,97 @@ pub fun build-document(tokens: list<token>) : <div,exn> (dom, int)
     })
     ok
 
+  fun add-error(st0: dstate) : dstate
+    st(st0.stack, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors + 1)
+
+  fun is-one-of(name: string, xs: list<string>) : <div,exn> bool
+    match xs
+      Nil -> False
+      Cons(x, rest) -> if lower-ascii-string(name) == lower-ascii-string(x) then True else is-one-of(name, rest)
+
+  fun is-table-section(name: string) : bool
+    name == "tbody" || name == "thead" || name == "tfoot"
+
+  fun is-table-cell(name: string) : bool
+    name == "td" || name == "th"
+
+  fun has-open-any(stack0: list<frame>, tags: list<string>) : <div,exn> bool
+    match tags
+      Nil -> False
+      Cons(t, rest) -> if has-open(stack0, t) then True else has-open-any(stack0, rest)
+
+  fun close-cell(st0: dstate) : <div,exn> dstate
+    if has-open(st0.stack, "td") then
+      st(pop-to(st0.stack, "td"), st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors)
+    elif has-open(st0.stack, "th") then
+      st(pop-to(st0.stack, "th"), st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors)
+    else
+      st0
+
+  fun close-row(st0: dstate) : <div,exn> dstate
+    if has-open(st0.stack, "tr") then
+      st(pop-to(st0.stack, "tr"), st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors)
+    else
+      st0
+
+  fun ensure-tbody(st0: dstate) : <div,exn> dstate
+    if has-open-any(st0.stack, Cons("tbody", Cons("thead", Cons("tfoot", Nil)))) then
+      st0
+    else
+      push-el(st0, "tbody", Html, Nil)
+
+  fun ensure-tr(st0: dstate) : <div,exn> dstate
+    if has-open(st0.stack, "tr") then st0 else push-el(st0, "tr", Html, Nil)
+
+  fun foster-stack(stack0: list<frame>, child: tnode) : <div,exn> maybe<list<frame>>
+    match stack0
+      Cons(top, Cons(parent, rest)) ->
+        match top.kind
+          FEl(name,_,_) ->
+            if lower-ascii-string(name) == "table" then
+              Just(Cons(top, Cons(add-child(parent, child), rest)))
+            else
+              match foster-stack(Cons(parent, rest), child)
+                Just(tail) -> Just(Cons(top, tail))
+                Nothing -> Nothing
+          _ ->
+            match foster-stack(Cons(parent, rest), child)
+              Just(tail) -> Just(Cons(top, tail))
+              Nothing -> Nothing
+      _ -> Nothing
+
+  fun foster-append(st0: dstate, child: tnode) : <div,exn> dstate
+    match foster-stack(st0.stack, child)
+      Just(stack1) -> st(stack1, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors)
+      Nothing -> append(st0, child)
+
+  fun in-template-content(stack0: list<frame>) : bool
+    match stack0
+      Nil -> False
+      Cons(fr, rest) ->
+        match fr.kind
+          FTemplateContent -> True
+          _ -> in-template-content(rest)
+
+  fun foster-needed(stack0: list<frame>) : <div,exn> bool
+    val (nm, _) = current-element(stack0)
+    val name = lower-ascii-string(nm)
+    name == "table" || name == "tbody" || name == "thead" || name == "tfoot" || name == "tr"
+
+  fun mode-from-stack(stack0: list<frame>) : <div,exn> mode
+    if has-open(stack0, "td") || has-open(stack0, "th") then InCell
+    elif has-open(stack0, "tr") then InRow
+    elif has-open-any(stack0, Cons("tbody", Cons("thead", Cons("tfoot", Nil)))) then InTableBody
+    elif has-open(stack0, "colgroup") then InColumnGroup
+    elif has-open(stack0, "table") then InTable
+    else InBody
+
+  fun with-mode(st0: dstate, m: mode) : dstate
+    st(st0.stack, m, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors)
+
+  fun update-mode(st0: dstate) : <div,exn> dstate
+    with-mode(st0, mode-from-stack(st0.stack))
+
   fun process-one(t: token, st0: dstate) : <div,exn> (next: dstate, reprocess: bool)
     match st0.imode
       Initial ->
@@ -669,7 +765,11 @@ pub fun build-document(tokens: list<token>) : <div,exn> (dom, int)
                 val ns = element-ns(st0.stack, name)
                 val adj = adjust-tag-name(ns, name)
                 val st1 = if is-html-ns(ns) then close-p-if-needed(st0, adj) else st0
-                (start-tag(st1, name, attrs, selfClosing), False)
+                val st2 = start-tag(st1, name, attrs, selfClosing)
+                if is-html-ns(ns) && adj == "table" && !selfClosing then
+                  (st(st2.stack, InTable, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors), False)
+                else
+                  (st2, False)
               }
           TokEndTag(name) ->
             if name == "body" then
@@ -685,6 +785,200 @@ pub fun build-document(tokens: list<token>) : <div,exn> (dom, int)
             if s == "" then (st0, False) else (append(st0, TText(s)), False)
           TokComment(data) -> (append(st0, TComment(data)), False)
           TokDoctype(_,_,_,_) -> (st0, False)
+          TokEOF -> (add-eof-error(st0), False)
+      InTable ->
+        match t
+          TokStartTag(name, attrs, selfClosing) ->
+            if in-template-content(st0.stack) then
+              (start-tag(st0, name, attrs, selfClosing), False)
+            elif name == "table" then (add-error(st0), False)
+            elif name == "colgroup" then
+              { val st1 = start-tag(st0, name, attrs, selfClosing); (st(st1.stack, InColumnGroup, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False) }
+            elif is-table-section(name) then
+              { val st1 = start-tag(st0, name, attrs, selfClosing); (st(st1.stack, InTableBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False) }
+            elif name == "tr" then
+              {
+                val st1 = add-error(st0)
+                val st2 = ensure-tbody(st1)
+                val st3 = start-tag(st(st2.stack, InTableBody, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors), name, attrs, selfClosing)
+                (st(st3.stack, InRow, st3.html-inserted, st3.head-inserted, st3.body-inserted, st3.errors), False)
+              }
+            elif is-table-cell(name) then
+              {
+                val st1 = add-error(st0)
+                val st2 = ensure-tbody(st1)
+                val st3 = ensure-tr(st2)
+                val st4 = start-tag(st(st3.stack, InRow, st3.html-inserted, st3.head-inserted, st3.body-inserted, st3.errors), name, attrs, selfClosing)
+                (st(st4.stack, InCell, st4.html-inserted, st4.head-inserted, st4.body-inserted, st4.errors), False)
+              }
+            else
+              (start-tag(st0, name, attrs, selfClosing), False)
+          TokEndTag(name) ->
+            if in-template-content(st0.stack) then
+              if has-open(st0.stack, name) then
+                { val st1 = end-tag(st0, name); (update-mode(st1), False) }
+              else
+                (st(st0.stack, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors + 1), False)
+            elif name == "table" then
+              { val st1 = end-tag(st0, "table"); (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False) }
+            else
+              if has-open(st0.stack, name) then
+                { val st1 = end-tag(st0, name); (update-mode(st1), False) }
+              else
+                (st(st0.stack, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors + 1), False)
+          TokCharacter(s) ->
+            if is-ws(s) || in-template-content(st0.stack) || !foster-needed(st0.stack) then
+              (append(st0, TText(s)), False)
+            else
+              (foster-append(st0, TText(s)), False)
+          TokComment(data) -> (append(st0, TComment(data)), False)
+          TokDoctype(_,_,_,_) -> (add-error(st0), False)
+          TokEOF -> (add-eof-error(st0), False)
+      InTableBody ->
+        match t
+          TokStartTag(name, attrs, selfClosing) ->
+            if in-template-content(st0.stack) then
+              (start-tag(st0, name, attrs, selfClosing), False)
+            elif name == "tr" then
+              { val st1 = start-tag(st0, name, attrs, selfClosing); (st(st1.stack, InRow, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False) }
+            elif is-table-cell(name) then
+              {
+                val st1 = add-error(st0)
+                val st2 = ensure-tr(st1)
+                val st3 = start-tag(st(st2.stack, InRow, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors), name, attrs, selfClosing)
+                (st(st3.stack, InCell, st3.html-inserted, st3.head-inserted, st3.body-inserted, st3.errors), False)
+              }
+            elif is-table-section(name) then
+              {
+                val st1 = close-row(st0)
+                val st2 = end-tag(st1, name)
+                (st(st2.stack, InTable, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors), True)
+              }
+            elif name == "table" then
+              { val st1 = add-error(st0); (st(st1.stack, InTable, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True) }
+            else
+              (start-tag(st0, name, attrs, selfClosing), False)
+          TokEndTag(name) ->
+            if in-template-content(st0.stack) then
+              if has-open(st0.stack, name) then
+                { val st1 = end-tag(st0, name); (update-mode(st1), False) }
+              else
+                (st(st0.stack, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors + 1), False)
+            elif is-table-section(name) then
+              if has-open(st0.stack, name) then
+                { val st1 = end-tag(st0, name); (st(st1.stack, InTable, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False) }
+              else
+                (st(st0.stack, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors + 1), False)
+            elif name == "table" then
+              { val st1 = close-row(st0); val st2 = end-tag(st1, "tbody"); (st(st2.stack, InTable, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors), True) }
+            else
+              if has-open(st0.stack, name) then
+                { val st1 = end-tag(st0, name); (update-mode(st1), False) }
+              else
+                (st(st0.stack, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors + 1), False)
+          TokCharacter(s) ->
+            if is-ws(s) || in-template-content(st0.stack) || !foster-needed(st0.stack) then
+              (append(st0, TText(s)), False)
+            else
+              (foster-append(st0, TText(s)), False)
+          TokComment(data) -> (append(st0, TComment(data)), False)
+          TokDoctype(_,_,_,_) -> (add-error(st0), False)
+          TokEOF -> (add-eof-error(st0), False)
+      InColumnGroup ->
+        match t
+          TokStartTag(name, attrs, selfClosing) ->
+            if in-template-content(st0.stack) then
+              (start-tag(st0, name, attrs, selfClosing), False)
+            elif name == "col" then
+              (start-tag(st0, name, attrs, selfClosing), False)
+            elif name == "template" then
+              (start-tag(st0, name, attrs, selfClosing), False)
+            else
+              { val st1 = add-error(st0); val st2 = end-tag(st1, "colgroup"); (st(st2.stack, InTable, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors), True) }
+          TokEndTag(name) ->
+            if in-template-content(st0.stack) then
+              if has-open(st0.stack, name) then
+                { val st1 = end-tag(st0, name); (update-mode(st1), False) }
+              else
+                (st(st0.stack, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors + 1), False)
+            elif name == "colgroup" then
+              { val st1 = end-tag(st0, "colgroup"); (st(st1.stack, InTable, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False) }
+            elif name == "table" then
+              { val st1 = end-tag(st0, "colgroup"); (st(st1.stack, InTable, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True) }
+            else
+              if has-open(st0.stack, name) then
+                { val st1 = end-tag(st0, name); (update-mode(st1), False) }
+              else
+                (st(st0.stack, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors + 1), False)
+          TokCharacter(s) ->
+            if is-ws(s) then (append(st0, TText(s)), False) else (add-error(st0), False)
+          TokComment(data) -> (append(st0, TComment(data)), False)
+          TokDoctype(_,_,_,_) -> (add-error(st0), False)
+          TokEOF -> (add-eof-error(st0), False)
+      InRow ->
+        match t
+          TokStartTag(name, attrs, selfClosing) ->
+            if in-template-content(st0.stack) then
+              (start-tag(st0, name, attrs, selfClosing), False)
+            elif is-table-cell(name) then
+              { val st1 = start-tag(st0, name, attrs, selfClosing); (st(st1.stack, InCell, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False) }
+            elif name == "tr" then
+              { val st1 = add-error(st0); (st(st1.stack, InTableBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True) }
+            elif is-table-section(name) || name == "table" then
+              { val st1 = add-error(st0); (st(st1.stack, InTableBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True) }
+            else
+              (start-tag(st0, name, attrs, selfClosing), False)
+          TokEndTag(name) ->
+            if in-template-content(st0.stack) then
+              if has-open(st0.stack, name) then
+                { val st1 = end-tag(st0, name); (update-mode(st1), False) }
+              else
+                (st(st0.stack, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors + 1), False)
+            elif name == "tr" then
+              { val st1 = end-tag(st0, "tr"); (st(st1.stack, InTableBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False) }
+            elif name == "table" then
+              { val st1 = end-tag(st0, "tr"); (st(st1.stack, InTableBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True) }
+            else
+              if has-open(st0.stack, name) then
+                { val st1 = end-tag(st0, name); (update-mode(st1), False) }
+              else
+                (st(st0.stack, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors + 1), False)
+          TokCharacter(s) ->
+            if is-ws(s) || in-template-content(st0.stack) || !foster-needed(st0.stack) then
+              (append(st0, TText(s)), False)
+            else
+              (foster-append(st0, TText(s)), False)
+          TokComment(data) -> (append(st0, TComment(data)), False)
+          TokDoctype(_,_,_,_) -> (add-error(st0), False)
+          TokEOF -> (add-eof-error(st0), False)
+      InCell ->
+        match t
+          TokEndTag(name) ->
+            if in-template-content(st0.stack) then
+              if has-open(st0.stack, name) then
+                { val st1 = end-tag(st0, name); (update-mode(st1), False) }
+              else
+                (st(st0.stack, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors + 1), False)
+            elif is-table-cell(name) then
+              { val st1 = end-tag(st0, name); (st(st1.stack, InRow, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False) }
+            elif name == "table" then
+              { val st1 = close-cell(st0); (st(st1.stack, InRow, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True) }
+            else
+              if has-open(st0.stack, name) then
+                { val st1 = end-tag(st0, name); (update-mode(st1), False) }
+              else
+                (st(st0.stack, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors + 1), False)
+          TokStartTag(name, attrs, selfClosing) ->
+            if in-template-content(st0.stack) then
+              (start-tag(st0, name, attrs, selfClosing), False)
+            elif is-one-of(name, Cons("td", Cons("th", Cons("tr", Cons("tbody", Cons("thead", Cons("tfoot", Cons("table", Nil)))))))) then
+              { val st1 = close-cell(st0); (st(st1.stack, InRow, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True) }
+            else
+              (start-tag(st0, name, attrs, selfClosing), False)
+          TokCharacter(s) ->
+            if s == "" then (st0, False) else (append(st0, TText(s)), False)
+          TokComment(data) -> (append(st0, TComment(data)), False)
+          TokDoctype(_,_,_,_) -> (add-error(st0), False)
           TokEOF -> (add-eof-error(st0), False)
       AfterBody ->
         match t
