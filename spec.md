@@ -187,6 +187,13 @@ We will add:
 - Runs the test suite (the Python test runner).
 - Runs `./tools/html5lib_allowlists_cli.py diff-prev --fail-on-decrease` to prevent coverage regressions.
 
+## Koka compiler source repo
+
+This repo contains the `./koka` submodule for reference only.
+
+- For local development and for this repo’s scripts/tests, use the `koka` compiler already installed and available on `PATH`.
+- Do not build or invoke the compiler from the `./koka` submodule as part of normal builds/tests.
+
 ---
 
 # Milestones
@@ -249,4 +256,3 @@ Exit criteria:
 - Track progress with `allowlists.diff-prev.txt` per commit.
 
 ---
-```
