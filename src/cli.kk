@@ -3,8 +3,12 @@ module cli
 import std/os/env
 import std/os/file
 import std/os/path
+import std/os/readline
+import std/core/string
+import std/core/int
 
 import html5/json
+import html5/base64
 import html5/tokenizer
 import html5/dom
 
@@ -67,11 +71,47 @@ fun run-tokenizer(args: list<string>) : <console,fsys,div,exn> ()
   val out = json/arr(toks.map(token-json))
   out.println
 
+fun run-tokenizer-batch() : <console,div,exn> ()
+  // stdin protocol:
+  // - First line: integer N
+  // - Per case:
+  //   - Header line: "<state>\t<lastStartTagOr->\t<base64_char_len>"
+  //   - Followed by as many base64 chunk lines (<= ~900 chars) as needed
+  val n = readline().trim.parse-int.default(0)
+
+  fun read-b64(remaining: int, acc: list<string>) : <console,div,exn> list<string>
+    if remaining <= 0 then acc else
+      val chunk = readline()
+      read-b64(remaining - chunk.count, Cons(chunk, acc))
+
+  fun go(i: int, outs: list<string>) : <console,div,exn> list<string>
+    if i >= n then outs.reverse else
+      val header = readline()
+      val parts = string/sep/split(header, "\t")
+      match parts
+        Cons(stateArg, Cons(_last, Cons(lenStr, _rest))) ->
+          {
+            val b64len = lenStr.trim.parse-int.default(-1)
+            if b64len < 0 then exn/throw("invalid base64 length")
+            val chunks = read-b64(b64len, Nil)
+            val b64 = chunks.reverse.join("")
+            if b64.count != b64len then exn/throw("base64 length mismatch")
+            val input = base64/decode-utf8(b64)
+            val (tokens, _errors) = tokenizer/tokenize(input, state-from-arg(stateArg))
+            val toks = tokens.filter(fn(t) match t { TokEOF -> False; _ -> True })
+            val out = json/arr(toks.map(token-json))
+            go(i + 1, Cons(out, outs))
+          }
+        _ -> exn/throw("invalid batch line (expected 3 tab-separated fields)")
+
+  json/arr(go(0, Nil)).println
+
 pub fun main()
   val args = get-args()
   match args
     Cons(cmd, rest) ->
       match cmd
         "tokenizer" -> run-tokenizer(Cons(cmd, rest))
-        _ -> "usage: cli tokenizer <state> <lastStartTagOr-> <inputPath>".println
-    _ -> "usage: cli tokenizer <state> <lastStartTagOr-> <inputPath>".println
+        "tokenizer-batch" -> run-tokenizer-batch()
+        _ -> "usage: cli tokenizer <state> <lastStartTagOr-> <inputPath> | cli tokenizer-batch".println
+    _ -> "usage: cli tokenizer <state> <lastStartTagOr-> <inputPath> | cli tokenizer-batch".println

@@ -2,12 +2,12 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from html5lib_allowlists import load, repo_root_from_tools_path, get_indices
 
@@ -18,37 +18,37 @@ ROOT = repo_root_from_tools_path()
 def build_runner(exe: Path) -> None:
     exe.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(
-        ["koka", "--rebuild", "--include=src", "-O2", "-o", str(exe), "src/cli.kk"],
+        ["koka", "--include=src", "-O2", "-o", str(exe), "src/cli.kk"],
         cwd=str(ROOT),
         check=True,
     )
     exe.chmod(0o755)
 
 
-def _iter_enabled(kind: str, fixture: str, indices: list[int]) -> Iterable[tuple[int, Any]]:
-    for idx in indices:
-        yield idx, idx
+def run_tokenizer_cases_batch(exe: Path, cases: list[dict[str, Any]]) -> list[list[Any]]:
+    lines: list[str] = [str(len(cases))]
+    for case in cases:
+        state_names = case.get("initialStates") or ["Data state"]
+        if state_names != ["Data state"]:
+            raise RuntimeError("non-Data initialStates not supported yet")
+        state = "Data"
+        last = case.get("lastStartTag") or "-"
+        payload = base64.b64encode(case["input"].encode("utf-8", "surrogatepass")).decode("ascii")
+        lines.append(f"{state}\t{last}\t{len(payload)}")
+        chunk_size = 900  # Koka std/os/readline caps at 1023 chars.
+        lines.extend(payload[i : i + chunk_size] for i in range(0, len(payload), chunk_size))
 
-
-def run_tokenizer_case(exe: Path, case: dict[str, Any]) -> list[Any]:
-    input_text = case["input"]
-    with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as f:
-        f.write(input_text)
-        input_path = f.name
-    state_names = case.get("initialStates") or ["Data state"]
-    # For now: only run Data state; other states will be enabled later.
-    if state_names != ["Data state"]:
-        raise RuntimeError("non-Data initialStates not supported yet")
-    state = "Data"
-    last = case.get("lastStartTag") or "-"
     proc = subprocess.run(
-        [str(exe), "tokenizer", state, last, input_path],
+        [str(exe), "tokenizer-batch"],
         cwd=str(ROOT),
         check=True,
+        input="\n".join(lines) + "\n",
         stdout=subprocess.PIPE,
         text=True,
     )
-    return json.loads(proc.stdout)
+    out = json.loads(proc.stdout)
+    assert isinstance(out, list)
+    return out  # list[case_output]
 
 
 def main() -> int:
@@ -71,14 +71,15 @@ def main() -> int:
             continue
         payload = json.loads((tok_dir / fx).read_text(encoding="utf-8"))
         tests = payload.get("tests") or payload.get("xmlViolationTests") or []
-        for idx in enabled:
-            case = tests[idx]
-            try:
-                got = run_tokenizer_case(exe, case)
-            except Exception as e:  # noqa: BLE001
-                failures.append(f"tokenizer {fx} #{idx}: runner failed: {e}")
-                continue
-            expected = case["output"]
+        batch = [tests[idx] for idx in enabled]
+        try:
+            got_batch = run_tokenizer_cases_batch(exe, batch)
+        except Exception as e:  # noqa: BLE001
+            failures.append(f"tokenizer {fx}: runner failed: {e}")
+            continue
+
+        for idx, got in zip(enabled, got_batch, strict=True):
+            expected = tests[idx]["output"]
             if got != expected:
                 failures.append(f"tokenizer {fx} #{idx}: mismatch")
 

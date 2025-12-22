@@ -256,3 +256,70 @@ Exit criteria:
 - Track progress with `allowlists.diff-prev.txt` per commit.
 
 ---
+
+## Milestone Execution Plan
+
+Guiding principles:
+- Prefer **vertical slices**: add one missing behavior end-to-end (tokenize → treebuild → serialize → allowlist → CI) per commit.
+- Keep the public API stable; refactor internals aggressively as needed.
+- Expand allowlists only when the behavior is deterministic and the diff tool stays green.
+
+### M0 (done)
+- Keep the smoke test (`tools/run_tests.py`) as the “can we build/run at all?” gate.
+
+### M1 (tokenizer correctness slice)
+1. Expand tokenizer coverage in this order (each as its own commit series):
+   - Markup declarations: `<!-- -->`, `<!DOCTYPE ...>` (enables many tree tests too).
+   - Rawtext/RCDATA/script/PLAINTEXT switching (driven by treebuilder start tags).
+   - Character references: spec-correct edge cases + attribute-value context.
+   - Error reporting hooks (record code + location; tests mostly check counts first).
+2. Improve the runner protocol to support:
+   - non-`Data` `initialStates`
+   - `lastStartTag`
+3. Increment allowlists:
+   - Add small, curated batches (5–20 cases) and keep them stable.
+
+### M2 (treebuilder core)
+1. Replace the placeholder stack builder with a real HTML5 treebuilder:
+   - Insertion modes: initial → before html → before head → in head → after head → in body (+ the minimal “after body” modes).
+   - Stack of open elements + active formatting elements (start with the subset needed by allowlisted tests).
+   - Void elements + implied end tags (enables basic `p`, `br`, etc.).
+2. Add a CLI mode for tree construction tests:
+   - `parse` and `parse-fragment`, returning `to-test-format` output.
+   - Include the parse error **count** in the transport output (html5lib tree tests only require the right count).
+3. Expand allowlists:
+   - Start with cases that only require: implied `<html>/<head>/<body>`, void elements, and basic in-body rules.
+
+### M3 (foreign content + templates)
+1. Namespace-sensitive element creation:
+   - HTML/SVG/Math transitions (integration points first; correctness incrementally).
+2. Template support:
+   - Template element + separate content node in the DOM arena.
+   - Template insertion modes stack.
+3. Expand allowlists from `foreign-*` and `template.dat` fixtures.
+
+### M4 (errors + locations)
+1. Thread a shared error sink through tokenizer + treebuilder:
+   - Record `(line,col)` as 1-based for both phases.
+   - Ensure “missing doctype” and common structural errors count correctly.
+2. Once counts are stable, consider mapping to canonical error code strings.
+
+### M5 (encoding + byte input)
+1. Add an internal byte-input layer + decoding to `string`.
+2. Implement enough encoding sniffing/overrides for the included encoding fixtures.
+3. Decide the public `parse-bytes` API once Koka’s bytes/story is locked in.
+
+### M6 (scale up coverage)
+1. Automation:
+   - A script to trial-enable new cases and record which ones pass.
+2. CI enforcement:
+   - Require allowlist diff to be non-decreasing and tests to be green.
+3. Regular maintenance:
+   - Keep commits small; each commit message includes `html5lib_allowlists_cli.py diff-prev`.
+
+## Current Status (2025-12-22)
+
+- M0: implemented (smoke test + minimal modules).
+- Tokenizer: passes the currently allowlisted tokenizer subset (2515/6810 = 36.9%).
+- Tree construction: harness not wired yet; allowlists currently `0/1590` (doc) and `0/192` (frag).
+- Not implemented yet (high-level): real HTML5 treebuilder insertion modes, foreign content/templates, error locations, encoding.

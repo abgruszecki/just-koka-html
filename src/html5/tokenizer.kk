@@ -3,6 +3,7 @@ module html5/tokenizer
 import std/core/string
 import html5/dom
 import html5/entities
+import html5/errors
 
 pub type tokenizer-state {
   Data
@@ -22,7 +23,7 @@ pub type token {
   TokEOF
 }
 
-pub struct parseerror(code: string, line: int, col: int)
+pub alias parseerror = errors/parseerror
 
 type st {
   SData

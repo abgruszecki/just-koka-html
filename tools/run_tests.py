@@ -20,7 +20,6 @@ def build_runner() -> None:
     run(
         [
             "koka",
-            "--rebuild",
             "--include=src",
             "-o",
             str(EXE),
