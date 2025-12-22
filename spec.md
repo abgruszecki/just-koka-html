@@ -321,5 +321,5 @@ Guiding principles:
 
 - M0: implemented (smoke test + minimal modules).
 - Tokenizer: passes the currently allowlisted tokenizer subset (6153/6810 = 90.4%) (includes non-`Data` `initialStates` + `lastStartTag`, plus more DOCTYPE parsing; parse errors still not emitted).
-- Tree construction: minimal insertion-mode slice for wrapper synthesis (auto `<html>/<head>/<body>`); allowlists currently `169/1590` (doc) and `20/192` (frag).
+- Tree construction: minimal insertion-mode slice for wrapper synthesis (auto `<html>/<head>/<body>`), plus basic in-body `p`-closing on block starts and EOF error counting; allowlists currently `245/1590` (doc) and `20/192` (frag).
 - Not implemented yet (high-level): full HTML5 treebuilder insertion modes + adoption agency + tables, foreign content/templates, error locations/codes, encoding + byte input.

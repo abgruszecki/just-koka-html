@@ -35,7 +35,7 @@ fun is-ws-only(s: string) : <div,exn> bool
 
 pub fun parse(html: string, opts: parseoptions = default-parse-options) : <div,exn> parseresult
   val (tokens, errors) = tokenizer/tokenize(html, Data)
-  val dom = treebuilder/build-document(tokens)
+  val (dom, treeErrCount) = treebuilder/build-document(tokens)
   // Tree construction tests only check parse error *counts*; start by matching the common "missing doctype" case.
   fun saw-leading-doctype(ts: list<tokenizer/token>) : <div,exn> bool
     match ts
@@ -47,10 +47,14 @@ pub fun parse(html: string, opts: parseoptions = default-parse-options) : <div,e
           TokCharacter(s) -> if is-ws-only(s) then saw-leading-doctype(rest) else False
           _ -> False
 
-  val errors2 =
-    if saw-leading-doctype(tokens) then errors
-    else errors ++ Cons(Parseerror("missing-doctype", 1, 1), Nil)
-  Parseresult(dom, errors2)
+  fun add-n-tree-errors(n: int, acc: list<parseerror>) : <div> list<parseerror>
+    if n <= 0 then acc else add-n-tree-errors(n - 1, Cons(Parseerror("tree-error", 1, 1), acc))
+
+  val withTree = add-n-tree-errors(treeErrCount, errors)
+  val withMissingDoctype =
+    if saw-leading-doctype(tokens) then withTree
+    else Cons(Parseerror("missing-doctype", 1, 1), withTree)
+  Parseresult(dom, withMissingDoctype.reverse)
 
 pub fun parse-fragment(html: string, fragCtx: fragmentcontext, opts: parseoptions = default-parse-options) : <div,exn> parseresult
   val (tokens, errors) = tokenizer/tokenize(html, Data)
