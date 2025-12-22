@@ -14,7 +14,7 @@ from html5lib_allowlists import (
     count_tokenizer_cases,
     discover_tokenizer_fixtures,
 )
-from run_html5lib_tests import build_runner, run_tokenizer_cases_batch, _state_arg_from_html5lib
+from run_html5lib_tests import _state_arg_from_html5lib, build_runner, normalize_tokenizer_case, run_tokenizer_cases_batch
 
 
 ROOT = repo_root_from_tools_path()
@@ -42,15 +42,16 @@ def main() -> int:
         expanded: list[dict[str, Any]] = []
         mapping: list[tuple[int, list[Any]]] = []
         for idx, case in enumerate(tests):
+            input_text, expected_output, last0 = normalize_tokenizer_case(case)
             state_names = case.get("initialStates") or ["Data state"]
-            last = case.get("lastStartTag") or "-"
+            last = last0 or "-"
             try:
                 states = [_state_arg_from_html5lib(s) for s in state_names]
             except Exception:
                 continue
             for st in states:
-                expanded.append({"state": st, "last": last, "input": case["input"]})
-                mapping.append((idx, case["output"]))
+                expanded.append({"state": st, "last": last, "input": input_text})
+                mapping.append((idx, expected_output))
 
         # A case "passes" only if it matches expected output for every initialState entry.
         ok = [True] * len(tests)

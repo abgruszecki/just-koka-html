@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import codecs
 import json
 import os
 import subprocess
@@ -40,6 +41,118 @@ def _state_arg_from_html5lib(name: str) -> str:
     if name not in m:
         raise RuntimeError(f"unsupported initialStates entry: {name!r}")
     return m[name]
+
+
+def _decode_double_escaped_str(s: str) -> str:
+    # html5lib tokenizer fixtures sometimes use "doubleEscaped": true, where
+    # strings like "\\u0000" should be interpreted as a single escaped layer.
+    return codecs.decode(s, "unicode_escape")
+
+
+def _koka_decode_utf8_forgiving(data: bytes) -> str:
+    """
+    Mirror Koka's forgiving UTF-8 decoding used by `base64/decode-utf8`, which
+    maps invalid bytes to the private-use range U+EE000..U+EE0FF.
+    """
+    out: list[str] = []
+    i = 0
+    n = len(data)
+
+    def invalid_byte(byte: int) -> None:
+        out.append(chr(0xEE000 + byte))
+
+    while i < n:
+        b0 = data[i]
+        # 1-byte
+        if b0 < 0x80:
+            out.append(chr(b0))
+            i += 1
+            continue
+
+        # 2-byte
+        if 0xC2 <= b0 <= 0xDF and i + 1 < n:
+            b1 = data[i + 1]
+            if 0x80 <= b1 <= 0xBF:
+                out.append(chr(((b0 & 0x1F) << 6) | (b1 & 0x3F)))
+                i += 2
+                continue
+
+        # 3-byte
+        if 0xE0 <= b0 <= 0xEF and i + 2 < n:
+            b1 = data[i + 1]
+            b2 = data[i + 2]
+            ok = 0x80 <= b1 <= 0xBF and 0x80 <= b2 <= 0xBF
+            if ok:
+                if b0 == 0xE0:
+                    ok = b1 >= 0xA0
+                elif b0 == 0xED:
+                    ok = b1 <= 0x9F  # exclude surrogates
+            if ok:
+                out.append(chr(((b0 & 0x0F) << 12) | ((b1 & 0x3F) << 6) | (b2 & 0x3F)))
+                i += 3
+                continue
+
+        # 4-byte
+        if 0xF0 <= b0 <= 0xF4 and i + 3 < n:
+            b1 = data[i + 1]
+            b2 = data[i + 2]
+            b3 = data[i + 3]
+            ok = 0x80 <= b1 <= 0xBF and 0x80 <= b2 <= 0xBF and 0x80 <= b3 <= 0xBF
+            if ok:
+                if b0 == 0xF0:
+                    ok = b1 >= 0x90
+                elif b0 == 0xF4:
+                    ok = b1 <= 0x8F
+            if ok:
+                out.append(
+                    chr(((b0 & 0x07) << 18) | ((b1 & 0x3F) << 12) | ((b2 & 0x3F) << 6) | (b3 & 0x3F))
+                )
+                i += 4
+                continue
+
+        # Invalid leading byte or malformed sequence; consume one byte.
+        invalid_byte(b0)
+        i += 1
+
+    return "".join(out)
+
+
+def _koka_utf8_roundtrip(s: str) -> str:
+    return _koka_decode_utf8_forgiving(s.encode("utf-8", "surrogatepass"))
+
+
+def _decode_double_escaped_obj(x: Any) -> Any:
+    if isinstance(x, str):
+        return _decode_double_escaped_str(x)
+    if isinstance(x, list):
+        return [_decode_double_escaped_obj(v) for v in x]
+    if isinstance(x, dict):
+        return {_decode_double_escaped_obj(k): _decode_double_escaped_obj(v) for k, v in x.items()}
+    return x
+
+
+def normalize_tokenizer_case(case: dict[str, Any]) -> tuple[str, Any, str | None]:
+    """
+    Returns (input, expected_output, lastStartTagOrNone), applying html5lib's
+    `doubleEscaped` decoding when present.
+    """
+    double_escaped = bool(case.get("doubleEscaped"))
+    input_text0 = _decode_double_escaped_str(case["input"]) if double_escaped else case["input"]
+    expected0 = _decode_double_escaped_obj(case["output"]) if double_escaped else case["output"]
+    last0: str | None = case.get("lastStartTag")
+    if double_escaped and isinstance(last0, str):
+        last0 = _decode_double_escaped_str(last0)
+
+    def roundtrip_obj(x: Any) -> Any:
+        if isinstance(x, str):
+            return _koka_utf8_roundtrip(x)
+        if isinstance(x, list):
+            return [roundtrip_obj(v) for v in x]
+        if isinstance(x, dict):
+            return {roundtrip_obj(k): roundtrip_obj(v) for k, v in x.items()}
+        return x
+
+    return _koka_utf8_roundtrip(input_text0), roundtrip_obj(expected0), (_koka_utf8_roundtrip(last0) if last0 else None)
 
 
 def run_tokenizer_cases_batch(exe: Path, cases: list[dict[str, Any]]) -> list[list[Any]]:
@@ -180,12 +293,13 @@ def main() -> int:
         expect: list[tuple[int, str, list[Any]]] = []
         for idx in enabled:
             case = tests[idx]
+            input_text, expected_output, last0 = normalize_tokenizer_case(case)
             state_names = case.get("initialStates") or ["Data state"]
-            last = case.get("lastStartTag") or "-"
+            last = last0 or "-"
             for st_name in state_names:
                 st = _state_arg_from_html5lib(st_name)
-                expanded.append({"state": st, "last": last, "input": case["input"]})
-                expect.append((idx, st, case["output"]))
+                expanded.append({"state": st, "last": last, "input": input_text})
+                expect.append((idx, st, expected_output))
         try:
             got_batch = run_tokenizer_cases_batch(exe, expanded)
         except Exception as e:  # noqa: BLE001

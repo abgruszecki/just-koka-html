@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from html5lib_allowlists import count_tokenizer_cases, discover_tokenizer_fixtures, repo_root_from_tools_path
-from run_html5lib_tests import _state_arg_from_html5lib, build_runner, run_tokenizer_cases_batch
+from run_html5lib_tests import _state_arg_from_html5lib, build_runner, normalize_tokenizer_case, run_tokenizer_cases_batch
 
 
 ROOT = repo_root_from_tools_path()
@@ -54,16 +54,17 @@ def main() -> int:
         expanded: list[dict[str, Any]] = []
         mapping: list[tuple[int, str, list[Any]]] = []
         for idx, case in enumerate(tests):
+            input_text, expected_output, last0 = normalize_tokenizer_case(case)
             state_names = case.get("initialStates") or ["Data state"]
-            last = case.get("lastStartTag") or "-"
+            last = last0 or "-"
             try:
                 states = [_state_arg_from_html5lib(s) for s in state_names]
             except Exception:
                 # Unknown initial state entry; skip for now.
                 continue
             for st in states:
-                expanded.append({"state": st, "last": last, "input": case["input"]})
-                mapping.append((idx, st, case["output"]))
+                expanded.append({"state": st, "last": last, "input": input_text})
+                mapping.append((idx, st, expected_output))
 
         if not expanded:
             continue
@@ -79,9 +80,9 @@ def main() -> int:
                 print(f"fixture: {fx}")
                 print(f"index: {idx}")
                 print(f"state: {st}")
-                print(f"lastStartTag: {tests[idx].get('lastStartTag')!r}")
+                print(f"lastStartTag: {last0!r}")
                 print("input:")
-                print(tests[idx]["input"])
+                print(input_text)
                 print("\nexpected:")
                 print(json.dumps(expected, ensure_ascii=False))
                 print("\ngot:")

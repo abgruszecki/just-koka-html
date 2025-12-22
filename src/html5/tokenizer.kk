@@ -90,6 +90,9 @@ fun is-ascii-alnum(c: char) : bool
 fun is-ws(c: char) : bool
   c == ' ' || c == '\n' || c == '\t' || c == '\r' || c == '\u000c'
 
+fun repl-nul(c: char) : char
+  if c == '\u0000' then '\uFFFD' else c
+
 fun lower-ascii-string(s: string) : <div,exn> string
   val cs = string/vector(s)
   fun go(i: int, acc: list<char>) : <div,exn> list<char>
@@ -119,9 +122,6 @@ fun preprocess(input: string) : <div,exn> vector<char>
     if c0 == '\r' then
       out := Cons('\n', out)
       if (i + 1 < cs.length && cs[i+1] == '\n') then i := i + 2 else i := i + 1
-    elif c0 == '\u0000' then
-      out := Cons('\uFFFD', out)
-      i := i + 1
     else
       out := Cons(c0, out)
       i := i + 1
@@ -444,7 +444,7 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
             Just(s) -> text-acc := s.list.reverse ++ text-acc
           i := i + consumed - 1
         else
-          text-acc := Cons(c, text-acc)
+          text-acc := Cons(repl-nul(c), text-acc)
       SRCDATA ->
         if c == '&' then
           val (consumed, repl) = consume-char-ref(cs, i, False)
@@ -455,17 +455,17 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
         elif c == '<' then
           state := SRCDATALessThanSign
         else
-          text-acc := Cons(c, text-acc)
+          text-acc := Cons(repl-nul(c), text-acc)
       SRAWTEXT ->
         if c == '<' then
           state := SRAWTEXTLessThanSign
         else
-          text-acc := Cons(c, text-acc)
+          text-acc := Cons(repl-nul(c), text-acc)
       SScriptData ->
         if c == '<' then
           state := SScriptDataLessThanSign
         else
-          text-acc := Cons(c, text-acc)
+          text-acc := Cons(repl-nul(c), text-acc)
       SRCDATALessThanSign ->
         if c == '/' then
           { temp-buffer := Nil; cur-is-end := True; cur-name := Nil; state := SRCDATAEndTagOpen }
@@ -543,7 +543,7 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
         else
           { emit-temp-as-text(); reconsume(SScriptData) }
       SPlaintext ->
-        text-acc := Cons(c, text-acc)
+        text-acc := Cons(repl-nul(c), text-acc)
       SCDataSection ->
         if (c == ']' && i + 2 < cs.length && cs[i + 1] == ']' && cs[i + 2] == '>') then
           { state := SData; i := i + 2 }
@@ -595,24 +595,24 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
         elif c == '>' then
           { emit-token(TokComment("")); state := SData }
         else
-          { comment-acc := Cons(c, comment-acc); state := SComment }
+          { comment-acc := Cons(repl-nul(c), comment-acc); state := SComment }
       SCommentStartDash ->
         if c == '-' then
           state := SCommentEnd
         elif c == '>' then
           { emit-token(TokComment("")); state := SData }
         else
-          { comment-acc := Cons('-', comment-acc); comment-acc := Cons(c, comment-acc); state := SComment }
+          { comment-acc := Cons('-', comment-acc); comment-acc := Cons(repl-nul(c), comment-acc); state := SComment }
       SComment ->
         if c == '-' then
           state := SCommentEndDash
         else
-          comment-acc := Cons(c, comment-acc)
+          comment-acc := Cons(repl-nul(c), comment-acc)
       SCommentEndDash ->
         if c == '-' then
           state := SCommentEnd
         else
-          { comment-acc := Cons('-', comment-acc); comment-acc := Cons(c, comment-acc); state := SComment }
+          { comment-acc := Cons('-', comment-acc); comment-acc := Cons(repl-nul(c), comment-acc); state := SComment }
       SCommentEnd ->
         if c == '>' then
           { emit-token(TokComment(string/listchar/string(comment-acc.reverse))); state := SData }
@@ -625,7 +625,7 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
             // "--" was part of the comment; emit and continue.
             comment-acc := Cons('-', comment-acc)
             comment-acc := Cons('-', comment-acc)
-            comment-acc := Cons(c, comment-acc)
+            comment-acc := Cons(repl-nul(c), comment-acc)
             state := SComment
           }
       SCommentEndBang ->
@@ -634,12 +634,12 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
         elif c == '-' then
           { comment-acc := Cons('-', comment-acc); comment-acc := Cons('-', comment-acc); comment-acc := Cons('!', comment-acc); state := SCommentEndDash }
         else
-          { comment-acc := Cons('-', comment-acc); comment-acc := Cons('-', comment-acc); comment-acc := Cons('!', comment-acc); comment-acc := Cons(c, comment-acc); state := SComment }
+          { comment-acc := Cons('-', comment-acc); comment-acc := Cons('-', comment-acc); comment-acc := Cons('!', comment-acc); comment-acc := Cons(repl-nul(c), comment-acc); state := SComment }
       SBogusComment ->
         if c == '>' then
           { emit-token(TokComment(string/listchar/string(comment-acc.reverse))); state := SData }
         else
-          comment-acc := Cons(c, comment-acc)
+          comment-acc := Cons(repl-nul(c), comment-acc)
       SBeforeDoctypeName ->
         if is-ws(c) then
           ()
@@ -648,7 +648,7 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
           emit-doctype()
           state := SData
         else
-          doctype-name := Cons(lower-ascii(c), Nil)
+          doctype-name := Cons(repl-nul(lower-ascii(c)), Nil)
           state := SDoctypeName
       SDoctypeName ->
         if c == '>' then
@@ -657,7 +657,7 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
         elif is-ws(c) then
           state := SAfterDoctypeName
         else
-          doctype-name := Cons(lower-ascii(c), doctype-name)
+          doctype-name := Cons(repl-nul(lower-ascii(c)), doctype-name)
       SAfterDoctypeName ->
         if is-ws(c) then
           ()
@@ -698,14 +698,14 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
         elif c == '>' then
           { doctype-force := True; doctype-public := Just(string/listchar/string(doctype-id-acc.reverse)); emit-doctype(); state := SData }
         else
-          doctype-id-acc := Cons(c, doctype-id-acc)
+          doctype-id-acc := Cons(repl-nul(c), doctype-id-acc)
       SDoctypePublicIdSQ ->
         if c == '\'' then
           { doctype-public := Just(string/listchar/string(doctype-id-acc.reverse)); doctype-id-acc := Nil; state := SAfterDoctypePublicId }
         elif c == '>' then
           { doctype-force := True; doctype-public := Just(string/listchar/string(doctype-id-acc.reverse)); emit-doctype(); state := SData }
         else
-          doctype-id-acc := Cons(c, doctype-id-acc)
+          doctype-id-acc := Cons(repl-nul(c), doctype-id-acc)
       SAfterDoctypePublicId ->
         if is-ws(c) then
           state := SBetweenDoctypePublicAndSystemId
@@ -756,14 +756,14 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
         elif c == '>' then
           { doctype-force := True; doctype-system := Just(string/listchar/string(doctype-id-acc.reverse)); emit-doctype(); state := SData }
         else
-          doctype-id-acc := Cons(c, doctype-id-acc)
+          doctype-id-acc := Cons(repl-nul(c), doctype-id-acc)
       SDoctypeSystemIdSQ ->
         if c == '\'' then
           { doctype-system := Just(string/listchar/string(doctype-id-acc.reverse)); doctype-id-acc := Nil; state := SAfterDoctypeSystemId }
         elif c == '>' then
           { doctype-force := True; doctype-system := Just(string/listchar/string(doctype-id-acc.reverse)); emit-doctype(); state := SData }
         else
-          doctype-id-acc := Cons(c, doctype-id-acc)
+          doctype-id-acc := Cons(repl-nul(c), doctype-id-acc)
       SAfterDoctypeSystemId ->
         if is-ws(c) then
           ()
@@ -778,7 +778,7 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
           ()
       SEndTagOpen ->
         if is-ascii-alpha(c) then
-          cur-name := Cons(lower-ascii(c), Nil)
+          cur-name := Cons(repl-nul(lower-ascii(c)), Nil)
           cur-attrs := Nil
           cur-selfclosing := False
           state := STagName
@@ -796,7 +796,7 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
         elif c == ' ' || c == '\n' || c == '\t' || c == '\r' then
           state := SBeforeAttrName
         else
-          cur-name := Cons(lower-ascii(c), cur-name)
+          cur-name := Cons(repl-nul(lower-ascii(c)), cur-name)
       SBeforeAttrName ->
         if c == '>' then
           { finish-tag(); state := tag-next-state }
@@ -806,7 +806,7 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
           ()
         else
           in-attr := True
-          cur-attr-name := Cons(lower-ascii(c), Nil)
+          cur-attr-name := Cons(repl-nul(lower-ascii(c)), Nil)
           cur-attr-value := Nil
           state := SAttrName
       SAttrName ->
@@ -821,7 +821,7 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
         elif c == '>' then
           { finish-tag(); state := tag-next-state }
         else
-          cur-attr-name := Cons(lower-ascii(c), cur-attr-name)
+          cur-attr-name := Cons(repl-nul(lower-ascii(c)), cur-attr-name)
       SAfterAttrName ->
         if c == '=' then
           // Start value for previous attr; but we already finished it. Ignore.
@@ -834,7 +834,7 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
           ()
         else
           in-attr := True
-          cur-attr-name := Cons(lower-ascii(c), Nil)
+          cur-attr-name := Cons(repl-nul(lower-ascii(c)), Nil)
           cur-attr-value := Nil
           state := SAttrName
       SBeforeAttrValue ->
@@ -847,7 +847,7 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
         elif c == '>' then
           { finish-tag(); state := tag-next-state }
         else
-          cur-attr-value := Cons(c, Nil)
+          cur-attr-value := Cons(repl-nul(c), Nil)
           state := SAttrValueUQ
       SAttrValueDQ ->
         if c == '\"' then
@@ -860,7 +860,7 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
             Just(s) -> cur-attr-value := s.list.reverse ++ cur-attr-value
           i := i + consumed - 1
         else
-          cur-attr-value := Cons(c, cur-attr-value)
+          cur-attr-value := Cons(repl-nul(c), cur-attr-value)
       SAttrValueSQ ->
         if c == '\'' then
           finish-attr()
@@ -872,7 +872,7 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
             Just(s) -> cur-attr-value := s.list.reverse ++ cur-attr-value
           i := i + consumed - 1
         else
-          cur-attr-value := Cons(c, cur-attr-value)
+          cur-attr-value := Cons(repl-nul(c), cur-attr-value)
       SAttrValueUQ ->
         if c == ' ' || c == '\n' || c == '\t' || c == '\r' then
           finish-attr()
@@ -886,7 +886,7 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
             Just(s) -> cur-attr-value := s.list.reverse ++ cur-attr-value
           i := i + consumed - 1
         else
-          cur-attr-value := Cons(c, cur-attr-value)
+          cur-attr-value := Cons(repl-nul(c), cur-attr-value)
       SAfterAttrValueQ ->
         if c == ' ' || c == '\n' || c == '\t' || c == '\r' then
           state := SBeforeAttrName
