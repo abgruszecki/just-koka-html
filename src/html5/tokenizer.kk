@@ -71,6 +71,10 @@ type st {
   SCommentStart
   SCommentStartDash
   SComment
+  SCommentLessThanSign
+  SCommentLessThanSignBang
+  SCommentLessThanSignBangDash
+  SCommentLessThanSignBangDashDash
   SCommentEndDash
   SCommentEnd
   SCommentEndBang
@@ -359,9 +363,24 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
   var doctype-id-acc : list<char> := Nil
   var last-start := lastStartTag
   var tag-next-state := SData
+  var cur-pos := 0
   var pending-endtag-solidus := False
   var endtag-solidus-saw-non-gt := False
   var endtag-attr-error-emitted := False
+  fun eq-attrnamespace(a: attrnamespace, b: attrnamespace) : bool
+    match (a,b)
+      (None, None) -> True
+      (XLink, XLink) -> True
+      (Xml, Xml) -> True
+      (Xmlns, Xmlns) -> True
+      _ -> False
+  fun eq-attrname(a: attrname, b: attrname) : bool
+    match (a,b)
+      (Attrname(ns1, local1), Attrname(ns2, local2)) -> (eq-attrnamespace(ns1, ns2) && local1 == local2)
+  fun has-attr(an: attrname, attrs: list<attr>) : bool
+    match attrs
+      Nil -> False
+      Cons(Attr(name,_), rest) -> eq-attrname(name, an) || has-attr(an, rest)
   fun flush-text()
     if text-acc != Nil then
       out := Cons(TokCharacter(string/listchar/string(text-acc.reverse)), out)
@@ -377,7 +396,10 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
       val v = string/listchar/string(cur-attr-value.reverse)
       if n != "" then
         val an = Attrname(None, n)
-        cur-attrs := Cons(Attr(an, v), cur-attrs)
+        if has-attr(an, cur-attrs) then
+          add-err("duplicate-attribute", cur-pos)
+        else
+          cur-attrs := Cons(Attr(an, v), cur-attrs)
       cur-attr-name := Nil
       cur-attr-value := Nil
       in-attr := False
@@ -452,6 +474,7 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
     i := i - 1
 
   while(fn(){ i < cs.length }, fn(){
+    cur-pos := i
     val c = cs[i]
     match state
       SData ->
@@ -743,8 +766,41 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
       SComment ->
         if c == '-' then
           state := SCommentEndDash
+        elif c == '<' then
+          state := SCommentLessThanSign
         else
           comment-acc := Cons(repl-nul(c), comment-acc)
+      SCommentLessThanSign ->
+        if c == '!' then
+          state := SCommentLessThanSignBang
+        elif c == '<' then
+          // The '<' was literal; keep it and stay in this state.
+          comment-acc := Cons('<', comment-acc)
+        else
+          { comment-acc := Cons('<', comment-acc); reconsume(SComment) }
+      SCommentLessThanSignBang ->
+        // We've seen "<!" inside a comment; treat it as literal "<!" unless we
+        // complete a nested-comment sequence.
+        comment-acc := Cons('<', comment-acc)
+        comment-acc := Cons('!', comment-acc)
+        if c == '-' then
+          state := SCommentLessThanSignBangDash
+        else
+          reconsume(SComment)
+      SCommentLessThanSignBangDash ->
+        if c == '-' then
+          state := SCommentLessThanSignBangDashDash
+        else
+          { comment-acc := Cons('-', comment-acc); reconsume(SComment) }
+      SCommentLessThanSignBangDashDash ->
+        if c == '>' then
+          { add-err("nested-comment", i); state := SCommentEnd }
+        else
+          {
+            comment-acc := Cons('-', comment-acc)
+            comment-acc := Cons('-', comment-acc)
+            reconsume(SComment)
+          }
       SCommentEndDash ->
         if c == '-' then
           state := SCommentEnd
@@ -914,7 +970,9 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
         else
           ()
       SEndTagOpen ->
-        if is-ascii-alpha(c) then
+        if c == '>' then
+          { add-err("missing-end-tag-name", i); state := SData }
+        elif is-ascii-alpha(c) then
           cur-name := Cons(repl-nul(lower-ascii(c)), Nil)
           cur-attrs := Nil
           cur-selfclosing := False
@@ -1071,6 +1129,13 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
     SCommentStart -> emit-token(TokComment(""))
     SCommentStartDash -> emit-token(TokComment(""))
     SComment -> emit-token(TokComment(string/listchar/string(comment-acc.reverse)))
+    SCommentLessThanSign ->
+      { comment-acc := Cons('<', comment-acc); emit-token(TokComment(string/listchar/string(comment-acc.reverse))) }
+    SCommentLessThanSignBang ->
+      { comment-acc := Cons('<', comment-acc); comment-acc := Cons('!', comment-acc); emit-token(TokComment(string/listchar/string(comment-acc.reverse))) }
+    SCommentLessThanSignBangDash ->
+      { comment-acc := Cons('-', comment-acc); emit-token(TokComment(string/listchar/string(comment-acc.reverse))) }
+    SCommentLessThanSignBangDashDash -> emit-token(TokComment(string/listchar/string(comment-acc.reverse)))
     SCommentEndDash ->
       { comment-acc := Cons('-', comment-acc); emit-token(TokComment(string/listchar/string(comment-acc.reverse))) }
     SCommentEnd ->
