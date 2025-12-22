@@ -278,8 +278,9 @@ fun consume-rawtext-endtag(cs: vector<char>, pos: int, lastStartTag: maybe<strin
           }
       }
 
-// M1: a pragmatic subset tokenizer (enough to start enabling non-entity tag/text tests).
-pub fun tokenize(input: string, initial: tokenizer-state = Data, lastStartTag: maybe<string> = Nothing)
+// M1: a pragmatic subset tokenizer (tokenizer-tests), plus an optional auto-switch mode
+// used by tree construction to approximate the spec's treebuilder-driven state changes.
+fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: maybe<string>, autoSwitch: bool)
   : <div,exn> (tokens: list<token>, errors: list<parseerror>)
   val cs = preprocess(input)
   // Precompute 1-based (line,col) for each codepoint in the preprocessed stream.
@@ -326,6 +327,8 @@ pub fun tokenize(input: string, initial: tokenizer-state = Data, lastStartTag: m
   var doctype-system : maybe<string> := Nothing
   var doctype-force := False
   var doctype-id-acc : list<char> := Nil
+  var last-start := lastStartTag
+  var tag-next-state := SData
   fun flush-text()
     if text-acc != Nil then
       out := Cons(TokCharacter(string/listchar/string(text-acc.reverse)), out)
@@ -349,6 +352,19 @@ pub fun tokenize(input: string, initial: tokenizer-state = Data, lastStartTag: m
   fun finish-tag()
     finish-attr()
     val name = string/listchar/string(cur-name.reverse).trim
+    tag-next-state := SData
+    if (!cur-is-end && autoSwitch && !cur-selfclosing) then
+      match name
+        "textarea" -> { last-start := Just(name); tag-next-state := SRCDATA }
+        "title" -> { last-start := Just(name); tag-next-state := SRCDATA }
+        "style" -> { last-start := Just(name); tag-next-state := SRAWTEXT }
+        "xmp" -> { last-start := Just(name); tag-next-state := SRAWTEXT }
+        "iframe" -> { last-start := Just(name); tag-next-state := SRAWTEXT }
+        "noembed" -> { last-start := Just(name); tag-next-state := SRAWTEXT }
+        "noframes" -> { last-start := Just(name); tag-next-state := SRAWTEXT }
+        "script" -> { last-start := Just(name); tag-next-state := SScriptData }
+        "plaintext" -> { last-start := Just(name); tag-next-state := SPlaintext }
+        _ -> ()
     if cur-is-end then
       emit-token(TokEndTag(name))
     else
@@ -405,7 +421,7 @@ pub fun tokenize(input: string, initial: tokenizer-state = Data, lastStartTag: m
             Just(s) -> text-acc := s.list.reverse ++ text-acc
           i := i + consumed - 1
         elif c == '<' then
-          val (consumed, tag) = consume-rawtext-endtag(cs, i, lastStartTag)
+          val (consumed, tag) = consume-rawtext-endtag(cs, i, last-start)
           match tag
             Nothing -> text-acc := Cons('<', text-acc)
             Just(name) ->
@@ -418,7 +434,7 @@ pub fun tokenize(input: string, initial: tokenizer-state = Data, lastStartTag: m
           text-acc := Cons(c, text-acc)
       SRAWTEXT ->
         if c == '<' then
-          val (consumed, tag) = consume-rawtext-endtag(cs, i, lastStartTag)
+          val (consumed, tag) = consume-rawtext-endtag(cs, i, last-start)
           match tag
             Nothing -> text-acc := Cons('<', text-acc)
             Just(name) ->
@@ -431,7 +447,7 @@ pub fun tokenize(input: string, initial: tokenizer-state = Data, lastStartTag: m
           text-acc := Cons(c, text-acc)
       SScriptData ->
         if c == '<' then
-          val (consumed, tag) = consume-rawtext-endtag(cs, i, lastStartTag)
+          val (consumed, tag) = consume-rawtext-endtag(cs, i, last-start)
           match tag
             Nothing -> text-acc := Cons('<', text-acc)
             Just(name) ->
@@ -643,8 +659,7 @@ pub fun tokenize(input: string, initial: tokenizer-state = Data, lastStartTag: m
           reconsume(SData)
       STagName ->
         if c == '>' then
-          finish-tag()
-          state := SData
+          { finish-tag(); state := tag-next-state }
         elif c == '/' then
           state := SSelfClosingStartTag
         elif c == ' ' || c == '\n' || c == '\t' || c == '\r' then
@@ -653,8 +668,7 @@ pub fun tokenize(input: string, initial: tokenizer-state = Data, lastStartTag: m
           cur-name := Cons(lower-ascii(c), cur-name)
       SBeforeAttrName ->
         if c == '>' then
-          finish-tag()
-          state := SData
+          { finish-tag(); state := tag-next-state }
         elif c == '/' then
           state := SSelfClosingStartTag
         elif c == ' ' || c == '\n' || c == '\t' || c == '\r' then
@@ -674,8 +688,7 @@ pub fun tokenize(input: string, initial: tokenizer-state = Data, lastStartTag: m
           finish-attr()
           state := SSelfClosingStartTag
         elif c == '>' then
-          finish-tag()
-          state := SData
+          { finish-tag(); state := tag-next-state }
         else
           cur-attr-name := Cons(lower-ascii(c), cur-attr-name)
       SAfterAttrName ->
@@ -683,8 +696,7 @@ pub fun tokenize(input: string, initial: tokenizer-state = Data, lastStartTag: m
           // Start value for previous attr; but we already finished it. Ignore.
           state := SBeforeAttrValue
         elif c == '>' then
-          finish-tag()
-          state := SData
+          { finish-tag(); state := tag-next-state }
         elif c == '/' then
           state := SSelfClosingStartTag
         elif c == ' ' || c == '\n' || c == '\t' || c == '\r' then
@@ -702,8 +714,7 @@ pub fun tokenize(input: string, initial: tokenizer-state = Data, lastStartTag: m
         elif c == '\'' then
           state := SAttrValueSQ
         elif c == '>' then
-          finish-tag()
-          state := SData
+          { finish-tag(); state := tag-next-state }
         else
           cur-attr-value := Cons(c, Nil)
           state := SAttrValueUQ
@@ -736,8 +747,7 @@ pub fun tokenize(input: string, initial: tokenizer-state = Data, lastStartTag: m
           finish-attr()
           state := SBeforeAttrName
         elif c == '>' then
-          finish-tag()
-          state := SData
+          { finish-tag(); state := tag-next-state }
         elif c == '&' then
           val (consumed, repl) = consume-char-ref(cs, i, True)
           match repl
@@ -752,15 +762,12 @@ pub fun tokenize(input: string, initial: tokenizer-state = Data, lastStartTag: m
         elif c == '/' then
           state := SSelfClosingStartTag
         elif c == '>' then
-          finish-tag()
-          state := SData
+          { finish-tag(); state := tag-next-state }
         else
           reconsume(SBeforeAttrName)
       SSelfClosingStartTag ->
         if c == '>' then
-          cur-selfclosing := True
-          finish-tag()
-          state := SData
+          { cur-selfclosing := True; finish-tag(); state := tag-next-state }
         else
           reconsume(SBeforeAttrName)
     i := i + 1
@@ -787,3 +794,11 @@ pub fun tokenize(input: string, initial: tokenizer-state = Data, lastStartTag: m
   flush-text()
   out := Cons(TokEOF, out)
   (out.reverse, errs.reverse)
+
+pub fun tokenize(input: string, initial: tokenizer-state = Data, lastStartTag: maybe<string> = Nothing)
+  : <div,exn> (tokens: list<token>, errors: list<parseerror>)
+  tokenize-internal(input, initial, lastStartTag, False)
+
+pub fun tokenize-for-parse(input: string, initial: tokenizer-state = Data, lastStartTag: maybe<string> = Nothing)
+  : <div,exn> (tokens: list<token>, errors: list<parseerror>)
+  tokenize-internal(input, initial, lastStartTag, True)
