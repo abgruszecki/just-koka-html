@@ -1,9 +1,9 @@
 [submodule "justhtml"]
 	path = justhtml
-	url = ./justhtml
+	url = https://github.com/EmilStenstrom/justhtml.git
 [submodule "html5lib-tests"]
 	path = html5lib-tests
-	url = ./html5lib-tests
+	url = https://github.com/html5lib/html5lib-tests.git
 [submodule "koka"]
 	path = koka
-	url = ./koka
+	url = https://github.com/koka-lang/koka
