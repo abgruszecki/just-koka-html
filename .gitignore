@@ -1,0 +1,5 @@
+.logs--codex
+## Julia
+# Test manifests often capture absolute `path = ...` entries (e.g. local dev checkout),
+# which breaks CI checkouts in a different directory.
+test/Manifest.toml

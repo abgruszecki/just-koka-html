@@ -1,0 +1,9 @@
+[submodule "justhtml"]
+	path = justhtml
+	url = ./justhtml
+[submodule "html5lib-tests"]
+	path = html5lib-tests
+	url = ./html5lib-tests
+[submodule "koka"]
+	path = koka
+	url = ./koka
