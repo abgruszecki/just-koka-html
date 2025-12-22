@@ -732,7 +732,7 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
           text-acc := Cons('<', text-acc)
           reconsume(SData)
       SMarkupDeclOpen ->
-        if (c == '-' && i + 2 < cs.length && cs[i + 1] == '-' ) then
+        if (c == '-' && i + 1 < cs.length && cs[i + 1] == '-' ) then
           // Consume "<!--"
           comment-acc := Nil
           state := SCommentStart
@@ -1122,6 +1122,8 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
 
   // EOF
   match state
+    STagOpen -> text-acc := Cons('<', text-acc)
+    SMarkupDeclOpen -> emit-token(TokComment(""))
     SRCDATALessThanSign -> text-acc := Cons('<', text-acc)
     SRAWTEXTLessThanSign -> text-acc := Cons('<', text-acc)
     SScriptDataLessThanSign -> text-acc := Cons('<', text-acc)
@@ -1138,12 +1140,9 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
     SCommentLessThanSignBangDash ->
       { comment-acc := Cons('-', comment-acc); emit-token(TokComment(string/listchar/string(comment-acc.reverse))) }
     SCommentLessThanSignBangDashDash -> emit-token(TokComment(string/listchar/string(comment-acc.reverse)))
-    SCommentEndDash ->
-      { comment-acc := Cons('-', comment-acc); emit-token(TokComment(string/listchar/string(comment-acc.reverse))) }
-    SCommentEnd ->
-      { comment-acc := Cons('-', comment-acc); comment-acc := Cons('-', comment-acc); emit-token(TokComment(string/listchar/string(comment-acc.reverse))) }
-    SCommentEndBang ->
-      { comment-acc := Cons('-', comment-acc); comment-acc := Cons('-', comment-acc); comment-acc := Cons('!', comment-acc); emit-token(TokComment(string/listchar/string(comment-acc.reverse))) }
+    SCommentEndDash -> emit-token(TokComment(string/listchar/string(comment-acc.reverse)))
+    SCommentEnd -> emit-token(TokComment(string/listchar/string(comment-acc.reverse)))
+    SCommentEndBang -> emit-token(TokComment(string/listchar/string(comment-acc.reverse)))
     SEndTagOpen ->
       { text-acc := Cons('<', text-acc); text-acc := Cons('/', text-acc) }
     SBogusComment -> emit-token(TokComment(string/listchar/string(comment-acc.reverse)))
