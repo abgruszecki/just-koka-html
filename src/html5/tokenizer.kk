@@ -361,6 +361,7 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
   var doctype-system : maybe<string> := Nothing
   var doctype-force := False
   var doctype-id-acc : list<char> := Nil
+  var doctype-saw-ws := False
   var last-start := lastStartTag
   var tag-next-state := SData
   var cur-pos := 0
@@ -456,6 +457,7 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
     doctype-system := Nothing
     doctype-force := False
     doctype-id-acc := Nil
+    doctype-saw-ws := False
 
   fun map-initial(s: tokenizer-state) : st
     match s
@@ -744,6 +746,7 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
           doctype-system := Nothing
           doctype-force := False
           doctype-id-acc := Nil
+          doctype-saw-ws := False
           state := SBeforeDoctypeName
           i := i + 6
         else
@@ -837,12 +840,23 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
           comment-acc := Cons(repl-nul(c), comment-acc)
       SBeforeDoctypeName ->
         if is-ws(c) then
-          ()
+          doctype-saw-ws := True
         elif c == '>' then
-          doctype-force := True
-          emit-doctype()
-          state := SData
+          {
+            // html5lib counts both a legacy and a modern error here.
+            add-err("expected-doctype-name-but-got-right-bracket", i)
+            add-err("missing-doctype-name", i)
+            doctype-force := True
+            emit-doctype()
+            state := SData
+          }
         else
+          if !doctype-saw-ws then
+            {
+              // html5lib counts both a legacy and a modern error here.
+              add-err("need-space-after-doctype", i)
+              add-err("missing-whitespace-before-doctype-name", i)
+            }
           doctype-name := Cons(repl-nul(lower-ascii(c)), Nil)
           state := SDoctypeName
       SDoctypeName ->
