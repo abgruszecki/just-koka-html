@@ -6787,7 +6787,15 @@
         19
       ],
       "namespace-sensitivity.dat": [],
-      "noscript01.dat": [],
+      "noscript01.dat": [
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8
+      ],
       "pending-spec-changes-plain-text-unsafe.dat": [],
       "pending-spec-changes.dat": [
         2
@@ -6831,6 +6839,7 @@
       ],
       "template.dat": [
         0,
+        2,
         7,
         8,
         12,
@@ -6898,7 +6907,8 @@
         69,
         76,
         82,
-        88
+        88,
+        100
       ],
       "tests10.dat": [
         0,
@@ -6936,6 +6946,8 @@
       ],
       "tests15.dat": [],
       "tests16.dat": [
+        84,
+        86,
         91,
         92,
         93,
@@ -6944,6 +6956,8 @@
         96,
         97,
         98,
+        181,
+        183,
         188,
         189,
         190,
@@ -7074,7 +7088,8 @@
       "tests4.dat": [],
       "tests5.dat": [
         4,
-        11
+        11,
+        16
       ],
       "tests6.dat": [
         13,

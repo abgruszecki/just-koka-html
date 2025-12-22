@@ -742,6 +742,8 @@ pub fun build-document(tokens: list<token>) : <div,exn> (dom, int)
                 val st1 = ensure-body(st(stack1, InBody, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors), attrs)
                 (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False)
               }
+            elif name == "title" || name == "style" || name == "script" || name == "noscript" || name == "template" then
+              (start-tag(st0, name, attrs, selfClosing), False)
             elif name == "base" || name == "basefont" || name == "bgsound" || name == "link" || name == "meta" then
               (start-tag(st0, name, attrs, selfClosing), False)
             else
