@@ -7,6 +7,7 @@ import html5/tokenizer
 
 type tnode {
   TEl(name: string, ns: namespace, attrs: list<attr>, children: list<tnode>)
+  TTemplate(ns: namespace, attrs: list<attr>, content: list<tnode>)
   TText(data: string)
   TComment(data: string)
   TDoctype(dt: doctype)
@@ -16,6 +17,7 @@ type fkind {
   FDoc
   FFrag(frag-ctx: maybe<fragmentcontext>)
   FEl(name: string, ns: namespace, attrs: list<attr>)
+  FTemplateContent
 }
 
 type mode {
@@ -64,6 +66,140 @@ fun is-void-element(name: string) : bool
     "wbr" -> True
     _ -> False
 
+fun lower-ascii(c: char) : char
+  if (c >= 'A' && c <= 'Z') then (c.int + 32).char else c
+
+fun lower-ascii-string(s: string) : <div,exn> string
+  val cs = string/vector(s)
+  fun go(i: int, acc: list<char>) : <div,exn> list<char>
+    if i >= cs.length then acc.reverse
+    else go(i + 1, Cons(lower-ascii(cs[i]), acc))
+  string/listchar/string(go(0, Nil))
+
+fun slice-string(cs: vector<char>, start: int, end: int) : <div,exn> string
+  // end is exclusive
+  var acc : list<char> := Nil
+  var i := start
+  while(fn(){ i < end && i < cs.length }, fn(){
+    acc := Cons(cs[i], acc)
+    i := i + 1
+  })
+  string/listchar/string(acc.reverse)
+
+fun map-attr-name(name: string) : <div,exn> attrname
+  // Only enough for html5lib tree dump prefixing (xlink/xml/xmlns).
+  val cs = string/vector(name)
+  var colon := -1
+  var i := 0
+  while(fn(){ colon < 0 && i < cs.length }, fn(){
+    if cs[i] == ':' then colon := i else ()
+    i := i + 1
+  })
+  if colon < 0 then
+    if name == "xmlns" then Attrname(Xmlns, "xmlns") else Attrname(None, name)
+  else
+    {
+      val pre = slice-string(cs, 0, colon)
+      val local = slice-string(cs, colon + 1, cs.length)
+      match pre
+        "xlink" -> Attrname(XLink, local)
+        "xml" -> Attrname(Xml, local)
+        "xmlns" -> Attrname(Xmlns, local)
+        _ -> Attrname(None, name)
+    }
+
+fun map-attrs(attrs: list<attr>) : <div,exn> list<attr>
+  attrs.map(fn(a){ Attr(map-attr-name(a.name.local), a.value) })
+
+fun svg-tag-adjust(name: string) : string
+  // https://html.spec.whatwg.org/multipage/parsing.html#svg-tag-name-adjustments
+  match name
+    "altglyph" -> "altGlyph"
+    "altglyphdef" -> "altGlyphDef"
+    "altglyphitem" -> "altGlyphItem"
+    "animatecolor" -> "animateColor"
+    "animatemotion" -> "animateMotion"
+    "animatetransform" -> "animateTransform"
+    "clippath" -> "clipPath"
+    "feblend" -> "feBlend"
+    "fecolormatrix" -> "feColorMatrix"
+    "fecomponenttransfer" -> "feComponentTransfer"
+    "fecomposite" -> "feComposite"
+    "feconvolvematrix" -> "feConvolveMatrix"
+    "fediffuselighting" -> "feDiffuseLighting"
+    "fedisplacementmap" -> "feDisplacementMap"
+    "fedistantlight" -> "feDistantLight"
+    "fedropshadow" -> "feDropShadow"
+    "feflood" -> "feFlood"
+    "fefunca" -> "feFuncA"
+    "fefuncb" -> "feFuncB"
+    "fefuncg" -> "feFuncG"
+    "fefuncr" -> "feFuncR"
+    "fegaussianblur" -> "feGaussianBlur"
+    "feimage" -> "feImage"
+    "femerge" -> "feMerge"
+    "femergenode" -> "feMergeNode"
+    "femorphology" -> "feMorphology"
+    "feoffset" -> "feOffset"
+    "fepointlight" -> "fePointLight"
+    "fespecularlighting" -> "feSpecularLighting"
+    "fespotlight" -> "feSpotLight"
+    "fetile" -> "feTile"
+    "feturbulence" -> "feTurbulence"
+    "foreignobject" -> "foreignObject"
+    "glyphref" -> "glyphRef"
+    "lineargradient" -> "linearGradient"
+    "radialgradient" -> "radialGradient"
+    "textpath" -> "textPath"
+    _ -> name
+
+fun is-math-text-integration-point(name: string) : bool
+  match name
+    "mi" -> True
+    "mo" -> True
+    "mn" -> True
+    "ms" -> True
+    "mtext" -> True
+    _ -> False
+
+fun is-svg-html-integration-point(name: string) : bool
+  // https://html.spec.whatwg.org/multipage/parsing.html#html-integration-point
+  name == "foreignObject" || name == "desc" || name == "title"
+
+fun current-element(stack0: list<frame>) : <div> (name: string, ns: namespace)
+  match stack0
+    Nil -> ("", Html)
+    Cons(fr, rest) ->
+      match fr.kind
+        FEl(name, ns, _) -> (name, ns)
+        FFrag(mctx) ->
+          match mctx
+            Just(Fragmentcontext(tag, ns)) -> (tag, ns)
+            _ -> current-element(rest)
+        _ -> current-element(rest)
+
+fun element-ns(stack0: list<frame>, name: string) : <div> namespace
+  val (parentName, parentNs) = current-element(stack0)
+  match parentNs
+    Html ->
+      if name == "svg" then Svg
+      elif name == "math" then Math
+      else Html
+    Svg ->
+      if is-svg-html-integration-point(parentName) then Html else Svg
+    Math ->
+      if is-math-text-integration-point(parentName) then Html else Math
+
+fun adjust-tag-name(ns: namespace, name: string) : string
+  match ns
+    Svg -> svg-tag-adjust(name)
+    _ -> name
+
+fun is-html-ns(ns: namespace) : bool
+  match ns
+    Html -> True
+    _ -> False
+
 fun arena-from-children(rootNode: node, children: list<tnode>) : <div> dom
   var nodesRev : list<node> := Nil
   var nextId : int := 0
@@ -82,6 +218,12 @@ fun arena-from-children(rootNode: node, children: list<tnode>) : <div> dom
       TEl(name, ns, attrs, kids) ->
         val childIds = kids.map(alloc-tree)
         alloc(Element(name, ns, attrs, childIds))
+      TTemplate(ns, attrs, contentKids) ->
+        {
+          val contentChildIds = contentKids.map(alloc-tree)
+          val contentId = alloc(DocumentFragment(contentChildIds, Nothing))
+          alloc(Template(ns, attrs, Nil, contentId))
+        }
 
   val childIds = children.map(alloc-tree)
   val rootId =
@@ -92,7 +234,7 @@ fun arena-from-children(rootNode: node, children: list<tnode>) : <div> dom
   val nodes = vector/list/vector(nodesRev.reverse)
   Dom(nodes, rootId)
 
-fun build-tree(tokens: list<token>, initial: frame) : <div> list<tnode>
+fun build-tree(tokens: list<token>, initial: frame) : <div,exn> list<tnode>
   fun add-child(fr: frame, child: tnode) : frame
     Frame(fr.kind, Cons(child, fr.children))
 
@@ -106,7 +248,8 @@ fun build-tree(tokens: list<token>, initial: frame) : <div> list<tnode>
       Nil -> ()
       Cons(fr, rest) -> stack := Cons(add-child(fr, child), rest)
 
-  fun pop(endName: string)
+  fun pop-ci(endName: string)
+    val want = lower-ascii-string(endName)
     fun pop-loop()
       match stack
         Cons(top, Cons(parent, rest)) ->
@@ -114,21 +257,47 @@ fun build-tree(tokens: list<token>, initial: frame) : <div> list<tnode>
             FEl(name,_,_) ->
               {
                 stack := Cons(add-child(parent, close-frame(top)), rest)
-                if name == endName then () else pop-loop()
+                if lower-ascii-string(name) == want then () else pop-loop()
               }
             _ -> ()
         _ -> ()
     pop-loop()
 
-  fun has-open(tag: string)
-    fun go(xs: list<frame>) : bool
-      match xs
+  fun pop-template()
+    // Close any open elements inside the template content, then synthesize the template node.
+    fun close-until-content()
+      match stack
+        Cons(top, Cons(parent, rest)) ->
+          match top.kind
+            FEl(_,_,_) ->
+              { stack := Cons(add-child(parent, close-frame(top)), rest); close-until-content() }
+            _ -> ()
+        _ -> ()
+
+    close-until-content()
+    match stack
+      Cons(contentFr, Cons(tplFr, Cons(parent, rest))) ->
+        match (contentFr.kind, tplFr.kind)
+          (FTemplateContent, FEl(name, ns, attrs)) ->
+            if lower-ascii-string(name) == "template" then
+              {
+                val node = TTemplate(ns, attrs, contentFr.children.reverse)
+                stack := Cons(add-child(parent, node), rest)
+              }
+            else ()
+          _ -> ()
+      _ -> ()
+
+  fun has-open(xs: list<frame>, tag: string) : <div,exn> bool
+    val want = lower-ascii-string(tag)
+    fun go(ys: list<frame>) : <div,exn> bool
+      match ys
         Nil -> False
         Cons(fr, rest) ->
           match fr.kind
-            FEl(name,_,_) -> if name == tag then True else go(rest)
+            FEl(name,_,_) -> if lower-ascii-string(name) == want then True else go(rest)
             _ -> go(rest)
-    go(stack)
+    go(xs)
 
   fun consume(ts: list<token>)
     match ts
@@ -136,13 +305,23 @@ fun build-tree(tokens: list<token>, initial: frame) : <div> list<tnode>
       Cons(t, rest) ->
         match t
           TokStartTag(name, attrs, selfClosing) ->
-            if selfClosing || is-void-element(name) then
-              append(TEl(name, Html, attrs, Nil))
-            else if name == "p" && has-open("p") then
-              { pop("p"); push(FEl(name, Html, attrs)) }
-            else
-              push(FEl(name, Html, attrs))
-          TokEndTag(name) -> pop(name)
+            {
+              val ns0 = element-ns(stack, name)
+              val ns = ns0
+              val adjName0 = adjust-tag-name(ns, name)
+              val adjName = adjName0
+              val attrs1 = map-attrs(attrs)
+              if (is-html-ns(ns) && adjName == "template" && !selfClosing) then
+                { push(FEl("template", Html, attrs1)); push(FTemplateContent) }
+              elif selfClosing || (is-html-ns(ns) && is-void-element(adjName)) then
+                append(TEl(adjName, ns, attrs1, Nil))
+              else if (is-html-ns(ns) && adjName == "p" && has-open(stack, "p")) then
+                { pop-ci("p"); push(FEl(adjName, ns, attrs1)) }
+              else
+                push(FEl(adjName, ns, attrs1))
+            }
+          TokEndTag(name) ->
+            if lower-ascii-string(name) == "template" then pop-template() else pop-ci(name)
           TokCharacter(data) -> if data == "" then () else append(TText(data))
           TokComment(data) -> append(TComment(data))
           TokDoctype(name, publicId, systemId, forceQuirks) ->
@@ -160,6 +339,18 @@ fun build-tree(tokens: list<token>, initial: frame) : <div> list<tnode>
 
   while(has-unclosed, fn(){
     match stack
+      Cons(contentFr, Cons(tplFr, Cons(parent, rest))) ->
+        match (contentFr.kind, tplFr.kind)
+          (FTemplateContent, FEl(name, ns, attrs)) ->
+            if lower-ascii-string(name) == "template" then
+              stack := Cons(add-child(parent, TTemplate(ns, attrs, contentFr.children.reverse)), rest)
+            else
+              stack := Cons(add-child(tplFr, close-frame(contentFr)), Cons(parent, rest))
+          _ ->
+            match stack
+              Cons(top, Cons(parent2, rest2)) ->
+                stack := Cons(add-child(parent2, close-frame(top)), rest2)
+              _ -> ()
       Cons(top, Cons(parent, rest)) ->
         stack := Cons(add-child(parent, close-frame(top)), rest)
       _ -> ()
@@ -188,22 +379,22 @@ pub fun build-document(tokens: list<token>) : <div,exn> (dom, int)
   fun push-el(st0: dstate, name: string, ns: namespace, attrs: list<attr>) : dstate
     st(Cons(Frame(FEl(name, ns, attrs), Nil), st0.stack), st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors)
 
-  fun has-open(stack0: list<frame>, name: string) : <div> bool
+  fun has-open(stack0: list<frame>, name: string) : <div,exn> bool
     match stack0
       Nil -> False
       Cons(fr, rest) ->
         match fr.kind
-          FEl(elname,_,_) -> if elname == name then True else has-open(rest, name)
+          FEl(elname,_,_) -> if lower-ascii-string(elname) == lower-ascii-string(name) then True else has-open(rest, name)
           _ -> has-open(rest, name)
 
-  fun pop-to(stack0: list<frame>, name: string) : <div> list<frame>
+  fun pop-to(stack0: list<frame>, name: string) : <div,exn> list<frame>
     match stack0
       Cons(top, Cons(parent, rest)) ->
         match top.kind
           FEl(elname,_,_) ->
             {
               val stack1 = Cons(add-child(parent, close-frame(top)), rest)
-              if elname == name then stack1 else pop-to(stack1, name)
+              if lower-ascii-string(elname) == lower-ascii-string(name) then stack1 else pop-to(stack1, name)
             }
           _ -> stack0
       _ -> stack0
@@ -231,22 +422,55 @@ pub fun build-document(tokens: list<token>) : <div,exn> (dom, int)
         st(st2.stack, st2.imode, st2.html-inserted, st2.head-inserted, True, st2.errors)
       }
 
-  fun insert-void(st0: dstate, name: string, attrs: list<attr>) : dstate
-    append(st0, TEl(name, Html, attrs, Nil))
+  fun insert-void(st0: dstate, name: string, ns: namespace, attrs: list<attr>) : dstate
+    append(st0, TEl(name, ns, attrs, Nil))
 
-  fun start-tag(st0: dstate, name: string, attrs: list<attr>, selfClosing: bool) : <div> dstate
-    if selfClosing || is-void-element(name) then
-      insert-void(st0, name, attrs)
-    else if name == "p" && has-open(st0.stack, "p") then
-      {
-        val stack1 = pop-to(st0.stack, "p")
-        push-el(st(stack1, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors), name, Html, attrs)
-      }
-    else
-      push-el(st0, name, Html, attrs)
+  fun pop-template-stack(stack0: list<frame>) : <div,exn> list<frame>
+    fun close-inside(stack1: list<frame>) : <div,exn> list<frame>
+      match stack1
+        Cons(top, Cons(parent, rest)) ->
+          match top.kind
+            FEl(_,_,_) -> close-inside(Cons(add-child(parent, close-frame(top)), rest))
+            _ -> stack1
+        _ -> stack1
 
-  fun end-tag(st0: dstate, name: string) : <div> dstate
-    if has-open(st0.stack, name) then
+    val stack1 = close-inside(stack0)
+    match stack1
+      Cons(contentFr, Cons(tplFr, Cons(parent, rest))) ->
+        match (contentFr.kind, tplFr.kind)
+          (FTemplateContent, FEl(name, ns, attrs)) ->
+            if lower-ascii-string(name) == "template" then
+              Cons(add-child(parent, TTemplate(ns, attrs, contentFr.children.reverse)), rest)
+            else stack1
+          _ -> stack1
+      _ -> stack1
+
+  fun start-tag(st0: dstate, rawName: string, attrs: list<attr>, selfClosing: bool) : <div,exn> dstate
+    {
+      val ns0 = element-ns(st0.stack, rawName)
+      val ns = ns0
+      val name = adjust-tag-name(ns, rawName)
+      val attrs1 = map-attrs(attrs)
+      if (is-html-ns(ns) && name == "template" && !selfClosing) then
+        {
+          val st1 = push-el(st0, "template", Html, attrs1)
+          st(Cons(Frame(FTemplateContent, Nil), st1.stack), st1.imode, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors)
+        }
+      elif selfClosing || (is-html-ns(ns) && is-void-element(name)) then
+        insert-void(st0, name, ns, attrs1)
+      else if (is-html-ns(ns) && name == "p" && has-open(st0.stack, "p")) then
+        {
+          val stack1 = pop-to(st0.stack, "p")
+          push-el(st(stack1, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors), name, ns, attrs1)
+        }
+      else
+        push-el(st0, name, ns, attrs1)
+    }
+
+  fun end-tag(st0: dstate, name: string) : <div,exn> dstate
+    if lower-ascii-string(name) == "template" then
+      st(pop-template-stack(st0.stack), st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors)
+    elif has-open(st0.stack, name) then
       st(pop-to(st0.stack, name), st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors)
     else st0
 
@@ -325,7 +549,7 @@ pub fun build-document(tokens: list<token>) : <div,exn> (dom, int)
       "h6" -> True
       _ -> False
 
-  fun close-p-if-needed(st0: dstate, name: string) : <div> dstate
+  fun close-p-if-needed(st0: dstate, name: string) : <div,exn> dstate
     if closes-p-on-start(name) && has-open(st0.stack, "p") then
       st(pop-to(st0.stack, "p"), st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors)
     else
@@ -399,7 +623,7 @@ pub fun build-document(tokens: list<token>) : <div,exn> (dom, int)
             if name == "head" then
               { val stack1 = pop-to(st0.stack, "head"); (st(stack1, AfterHead, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors), False) }
             else (end-tag(st0, name), False)
-          TokStartTag(name, attrs, _selfClosing) ->
+          TokStartTag(name, attrs, selfClosing) ->
             if name == "html" then (st0, False)
             elif name == "head" then (st0, False)
             elif name == "body" then
@@ -409,7 +633,7 @@ pub fun build-document(tokens: list<token>) : <div,exn> (dom, int)
                 (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False)
               }
             elif name == "base" || name == "basefont" || name == "bgsound" || name == "link" || name == "meta" then
-              (insert-void(st0, name, attrs), False)
+              (start-tag(st0, name, attrs, selfClosing), False)
             else
               { val stack1 = pop-to(st0.stack, "head"); (st(stack1, AfterHead, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors), True) }
           TokCharacter(s) ->
@@ -440,7 +664,13 @@ pub fun build-document(tokens: list<token>) : <div,exn> (dom, int)
         match t
           TokStartTag(name, attrs, selfClosing) ->
             if name == "html" || name == "head" || name == "body" then (st0, False)
-            else { val st1 = close-p-if-needed(st0, name); (start-tag(st1, name, attrs, selfClosing), False) }
+            else
+              {
+                val ns = element-ns(st0.stack, name)
+                val adj = adjust-tag-name(ns, name)
+                val st1 = if is-html-ns(ns) then close-p-if-needed(st0, adj) else st0
+                (start-tag(st1, name, attrs, selfClosing), False)
+              }
           TokEndTag(name) ->
             if name == "body" then
               { val st1 = end-tag(st0, "body"); (st(st1.stack, AfterBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False) }
@@ -485,8 +715,20 @@ pub fun build-document(tokens: list<token>) : <div,exn> (dom, int)
     else
       { val stx = ensure-body(st3, Nil); st(pop-to(stx.stack, "body"), stx.imode, stx.html-inserted, stx.head-inserted, stx.body-inserted, stx.errors) }
 
-  fun close-all(stack0: list<frame>) : <div> list<frame>
+  fun close-all(stack0: list<frame>) : <div,exn> list<frame>
     match stack0
+      Cons(contentFr, Cons(tplFr, Cons(parent, rest))) ->
+        match (contentFr.kind, tplFr.kind)
+          (FTemplateContent, FEl(name, ns, attrs)) ->
+            if lower-ascii-string(name) == "template" then
+              close-all(Cons(add-child(parent, TTemplate(ns, attrs, contentFr.children.reverse)), rest))
+            else
+              close-all(Cons(add-child(tplFr, close-frame(contentFr)), Cons(parent, rest)))
+          _ ->
+            match stack0
+              Cons(top, Cons(parent2, rest2)) ->
+                close-all(Cons(add-child(parent2, close-frame(top)), rest2))
+              _ -> stack0
       Cons(top, Cons(parent, rest)) ->
         close-all(Cons(add-child(parent, close-frame(top)), rest))
       _ -> stack0
@@ -498,7 +740,7 @@ pub fun build-document(tokens: list<token>) : <div,exn> (dom, int)
   val dom = arena-from-children(Document(Nil, "no-quirks"), closed)
   (dom, st4.errors)
 
-pub fun build-fragment(tokens: list<token>, fragCtx: fragmentcontext) : <div> dom
+pub fun build-fragment(tokens: list<token>, fragCtx: fragmentcontext) : <div,exn> dom
   val initial = Frame(FFrag(Just(fragCtx)), Nil)
   val children = build-tree(tokens, initial)
   arena-from-children(DocumentFragment(Nil, Just(fragCtx)), children)

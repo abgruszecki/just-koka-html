@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -13,6 +14,7 @@ from html5lib_allowlists import load, repo_root_from_tools_path, get_indices, _s
 
 
 ROOT = repo_root_from_tools_path()
+RUNNER_TIMEOUT_S = float(os.environ.get("HTML5LIB_RUNNER_TIMEOUT_S", "30"))
 
 
 def build_runner(exe: Path) -> None:
@@ -57,6 +59,7 @@ def run_tokenizer_cases_batch(exe: Path, cases: list[dict[str, Any]]) -> list[li
         input="\n".join(lines) + "\n",
         stdout=subprocess.PIPE,
         text=True,
+        timeout=RUNNER_TIMEOUT_S,
     )
     out = json.loads(proc.stdout)
     assert isinstance(out, list)
@@ -146,6 +149,7 @@ def run_tree_cases_batch(exe: Path, cases: list[dict[str, Any]]) -> list[list[An
         input="\n".join(lines) + "\n",
         stdout=subprocess.PIPE,
         text=True,
+        timeout=RUNNER_TIMEOUT_S,
     )
     out = json.loads(proc.stdout)
     assert isinstance(out, list)
