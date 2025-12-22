@@ -359,6 +359,9 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
   var doctype-id-acc : list<char> := Nil
   var last-start := lastStartTag
   var tag-next-state := SData
+  var pending-endtag-solidus := False
+  var endtag-solidus-saw-non-gt := False
+  var endtag-attr-error-emitted := False
   fun flush-text()
     if text-acc != Nil then
       out := Cons(TokCharacter(string/listchar/string(text-acc.reverse)), out)
@@ -383,6 +386,8 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
     finish-attr()
     val name = string/listchar/string(cur-name.reverse).trim
     tag-next-state := SData
+    endtag-attr-error-emitted := False
+    endtag-solidus-saw-non-gt := False
     if (!cur-is-end && autoSwitch && !cur-selfclosing) then
       match name
         "textarea" -> { last-start := Just(name); tag-next-state := SRCDATA }
@@ -403,6 +408,7 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
     cur-name := Nil
     cur-attrs := Nil
     cur-selfclosing := False
+    pending-endtag-solidus := False
 
   fun is-appropriate-end-tag(ls: maybe<string>, tmp: list<char>) : <div,exn> bool
     match ls
@@ -498,8 +504,7 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
             if c == '>' then
               { emit-token(TokEndTag(string/listchar/string(temp-buffer.reverse))); temp-buffer := Nil; state := SData }
             elif c == '/' then
-              // html5lib tokenizer expects appropriate end tags to be "accepted" even if EOF happens here.
-              { state := SSelfClosingStartTag }
+              { pending-endtag-solidus := True; endtag-solidus-saw-non-gt := False; state := SSelfClosingStartTag }
             else
               { state := SBeforeAttrName }
           else
@@ -524,7 +529,7 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
             if c == '>' then
               { emit-token(TokEndTag(string/listchar/string(temp-buffer.reverse))); temp-buffer := Nil; state := SData }
             elif c == '/' then
-              { state := SSelfClosingStartTag }
+              { pending-endtag-solidus := True; endtag-solidus-saw-non-gt := False; state := SSelfClosingStartTag }
             else
               { state := SBeforeAttrName }
           else
@@ -551,7 +556,7 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
             if c == '>' then
               { emit-token(TokEndTag(string/listchar/string(temp-buffer.reverse))); temp-buffer := Nil; state := SData }
             elif c == '/' then
-              { state := SSelfClosingStartTag }
+              { pending-endtag-solidus := True; endtag-solidus-saw-non-gt := False; state := SSelfClosingStartTag }
             else
               { state := SBeforeAttrName }
           else
@@ -617,7 +622,7 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
             if c == '>' then
               { emit-token(TokEndTag(string/listchar/string(temp-buffer.reverse))); temp-buffer := Nil; state := SData }
             elif c == '/' then
-              { state := SSelfClosingStartTag }
+              { pending-endtag-solidus := True; endtag-solidus-saw-non-gt := False; state := SSelfClosingStartTag }
             else
               { state := SBeforeAttrName }
           else
@@ -924,8 +929,11 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
         if c == '>' then
           { finish-tag(); state := tag-next-state }
         elif c == '/' then
-          state := SSelfClosingStartTag
-        elif c == ' ' || c == '\n' || c == '\t' || c == '\r' then
+          if cur-is-end then
+            { pending-endtag-solidus := True; endtag-solidus-saw-non-gt := False; state := SSelfClosingStartTag }
+          else
+            state := SSelfClosingStartTag
+        elif is-ws(c) then
           state := SBeforeAttrName
         else
           cur-name := Cons(repl-nul(lower-ascii(c)), cur-name)
@@ -934,9 +942,11 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
           { finish-tag(); state := tag-next-state }
         elif c == '/' then
           state := SSelfClosingStartTag
-        elif c == ' ' || c == '\n' || c == '\t' || c == '\r' then
+        elif is-ws(c) then
           ()
         else
+          if cur-is-end && !endtag-attr-error-emitted && !endtag-solidus-saw-non-gt then
+            { add-err("attributes-in-end-tag", i); add-err("end-tag-with-attributes", i); endtag-attr-error-emitted := True }
           in-attr := True
           cur-attr-name := Cons(repl-nul(lower-ascii(c)), Nil)
           cur-attr-value := Nil
@@ -944,7 +954,7 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
       SAttrName ->
         if c == '=' then
           state := SBeforeAttrValue
-        elif c == ' ' || c == '\n' || c == '\t' || c == '\r' then
+        elif is-ws(c) then
           finish-attr()
           state := SAfterAttrName
         elif c == '/' then
@@ -962,9 +972,11 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
           { finish-tag(); state := tag-next-state }
         elif c == '/' then
           state := SSelfClosingStartTag
-        elif c == ' ' || c == '\n' || c == '\t' || c == '\r' then
+        elif is-ws(c) then
           ()
         else
+          if cur-is-end && !endtag-attr-error-emitted && !endtag-solidus-saw-non-gt then
+            { add-err("attributes-in-end-tag", i); add-err("end-tag-with-attributes", i); endtag-attr-error-emitted := True }
           in-attr := True
           cur-attr-name := Cons(repl-nul(lower-ascii(c)), Nil)
           cur-attr-value := Nil
@@ -1030,8 +1042,20 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
           reconsume(SBeforeAttrName)
       SSelfClosingStartTag ->
         if c == '>' then
-          { cur-selfclosing := True; finish-tag(); state := tag-next-state }
+          {
+            cur-selfclosing := True
+            if cur-is-end && pending-endtag-solidus then
+              {
+                if !endtag-solidus-saw-non-gt then
+                  { add-err("self-closing-flag-on-end-tag", i); add-err("end-tag-with-trailing-solidus", i) }
+                pending-endtag-solidus := False
+              }
+            finish-tag()
+            state := tag-next-state
+          }
         else
+          if cur-is-end && pending-endtag-solidus then
+            { endtag-solidus-saw-non-gt := True; add-err("unexpected-character-after-solidus-in-tag", i); add-err("unexpected-solidus-in-tag", i); pending-endtag-solidus := False }
           reconsume(SBeforeAttrName)
     i := i + 1
   })
