@@ -320,6 +320,6 @@ Guiding principles:
 ## Current Status (2025-12-22)
 
 - M0: implemented (smoke test + minimal modules).
-- Tokenizer: passes the currently allowlisted tokenizer subset (6153/6810 = 90.4%) (includes non-`Data` `initialStates` + `lastStartTag`, plus more DOCTYPE parsing; parse errors still not emitted).
+- Tokenizer: passes the currently allowlisted tokenizer subset (6212/6810 = 91.2%) (includes non-`Data` `initialStates` + `lastStartTag`, improved numeric + named character reference handling, and now emits `(code,line,col)` parse errors though the harness still only compares token streams).
 - Tree construction: minimal insertion-mode slice for wrapper synthesis (auto `<html>/<head>/<body>`), plus basic in-body `p`-closing on block starts, EOF error counting, and stray end-tag error counting; allowlists currently `255/1590` (doc) and `20/192` (frag).
 - Not implemented yet (high-level): full HTML5 treebuilder insertion modes + adoption agency + tables, foreign content/templates, error locations/codes, encoding + byte input.

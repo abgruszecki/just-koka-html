@@ -138,7 +138,55 @@ fun parse-uint(cs: vector<char>, start: int, end: int, base: int) : <div,exn> in
   })
   n
 
-fun consume-char-ref(cs: vector<char>, pos: int) : <div,exn> (consumed: int, replacement: maybe<string>)
+fun map-numeric-codepoint(code: int) : int
+  // Map Windows-1252 C1 controls as required by the HTML spec.
+  match code
+    0x80 -> 0x20AC
+    0x82 -> 0x201A
+    0x83 -> 0x0192
+    0x84 -> 0x201E
+    0x85 -> 0x2026
+    0x86 -> 0x2020
+    0x87 -> 0x2021
+    0x88 -> 0x02C6
+    0x89 -> 0x2030
+    0x8A -> 0x0160
+    0x8B -> 0x2039
+    0x8C -> 0x0152
+    0x8E -> 0x017D
+    0x91 -> 0x2018
+    0x92 -> 0x2019
+    0x93 -> 0x201C
+    0x94 -> 0x201D
+    0x95 -> 0x2022
+    0x96 -> 0x2013
+    0x97 -> 0x2014
+    0x98 -> 0x02DC
+    0x99 -> 0x2122
+    0x9A -> 0x0161
+    0x9B -> 0x203A
+    0x9C -> 0x0153
+    0x9E -> 0x017E
+    0x9F -> 0x0178
+    _ -> code
+
+fun sanitize-codepoint(code0: int) : int
+  if code0 == 0 then 0xFFFD
+  elif code0 > 0x10FFFF then 0xFFFD
+  elif (code0 >= 0xD800 && code0 <= 0xDFFF) then 0xFFFD
+  else map-numeric-codepoint(code0)
+
+fun find-entity-match(cs: vector<char>, start: int, end: int) : <div,exn> (end: int, value: maybe<string>)
+  // Find the longest entity name in cs[start:end] (end is exclusive).
+  if end <= start then (end, Nothing) else
+    {
+      val key = slice-string(cs, start, end)
+      match entities/lookup(key)
+        Just(v) -> (end, Just(v))
+        Nothing -> find-entity-match(cs, start, end - 1)
+    }
+
+fun consume-char-ref(cs: vector<char>, pos: int, in-attr: bool) : <div,exn> (consumed: int, replacement: maybe<string>)
   // `pos` is the index of '&'.
   val len = cs.length
   val next = pos + 1
@@ -162,7 +210,7 @@ fun consume-char-ref(cs: vector<char>, pos: int) : <div,exn> (consumed: int, rep
           val hasSemi = (j < len && cs[j] == ';')
           val end = j
           val code = parse-uint(cs, digitsStart, end, if isHex then 16 else 10)
-          val safe = if (code <= 0 || code > 0x10FFFF) then 0xFFFD else code
+          val safe = sanitize-codepoint(code)
           val s = char/string(safe.char)
           val consumed = (if hasSemi then (j - pos + 1) else (j - pos))
           (consumed, Just(s))
@@ -171,23 +219,27 @@ fun consume-char-ref(cs: vector<char>, pos: int) : <div,exn> (consumed: int, rep
       var j := next
       while(fn(){ j < len && is-ascii-alnum(cs[j]) }, fn(){ j := j + 1 })
       if j == next then (1, Nothing) else
-        val hasSemi = (j < len && cs[j] == ';')
-        // Prefer semicolon-terminated form.
-        if hasSemi then
-          val key = slice-string(cs, next, j + 1)
-          match entities/lookup(key)
-            Just(v) -> (j - pos + 1, Just(v))
+        {
+          val hasSemi = (j < len && cs[j] == ';')
+          val maxEnd = if hasSemi then (j + 1) else j
+          val (k, rep) = find-entity-match(cs, next, maxEnd)
+          match rep
             Nothing -> (1, Nothing)
-        else
-          val key = slice-string(cs, next, j)
-          // Legacy (no semicolon) only if next char isn't alnum or '='.
-          val following = if j < len then cs[j] else '\u0000'
-          if (j < len && (is-ascii-alnum(following) || following == '=')) then
-            (1, Nothing)
-          else
-            match entities/lookup(key)
-              Just(v) -> (j - pos, Just(v))
-              Nothing -> (1, Nothing)
+            Just(v) ->
+              {
+                val endsSemi = (k > next && k <= len && cs[k - 1] == ';')
+                if (in-attr && !endsSemi) then
+                  {
+                    val following = if k < len then cs[k] else '\u0000'
+                    if (k < len && (is-ascii-alnum(following) || following == '=')) then
+                      (1, Nothing)
+                    else
+                      (k - pos, Just(v))
+                  }
+                else
+                  (k - pos, Just(v))
+              }
+        }
 
 fun consume-rawtext-endtag(cs: vector<char>, pos: int, lastStartTag: maybe<string>) : <div,exn> (consumed: int, tag: maybe<string>)
   // `pos` is the index of '<' in one of the rawtext-ish states.
@@ -230,6 +282,31 @@ fun consume-rawtext-endtag(cs: vector<char>, pos: int, lastStartTag: maybe<strin
 pub fun tokenize(input: string, initial: tokenizer-state = Data, lastStartTag: maybe<string> = Nothing)
   : <div,exn> (tokens: list<token>, errors: list<parseerror>)
   val cs = preprocess(input)
+  // Precompute 1-based (line,col) for each codepoint in the preprocessed stream.
+  fun positions(cs0: vector<char>) : <div,exn> (vector<int>, vector<int>)
+    var ls : list<int> := Nil
+    var cs2 : list<int> := Nil
+    var line := 1
+    var col := 1
+    var j := 0
+    while(fn(){ j < cs0.length }, fn(){
+      ls := Cons(line, ls)
+      cs2 := Cons(col, cs2)
+      val ch = cs0[j]
+      if ch == '\n' then
+        { line := line + 1; col := 1 }
+      else
+        col := col + 1
+      j := j + 1
+    })
+    (vector/list/vector(ls.reverse), vector/list/vector(cs2.reverse))
+
+  val (pos-line, pos-col) = positions(cs)
+  var errs : list<parseerror> := Nil
+  fun add-err(code: string, at: int)
+    val line = if (at >= 0 && at < pos-line.length) then pos-line[at] else 1
+    val col = if (at >= 0 && at < pos-col.length) then pos-col[at] else 1
+    errs := Cons(errors/Parseerror(code, line, col), errs)
 
   // Token under construction
   var cur-is-end := False
@@ -313,7 +390,7 @@ pub fun tokenize(input: string, initial: tokenizer-state = Data, lastStartTag: m
         if c == '<' then
           state := STagOpen
         elif c == '&' then
-          val (consumed, repl) = consume-char-ref(cs, i)
+          val (consumed, repl) = consume-char-ref(cs, i, False)
           match repl
             Nothing -> text-acc := Cons('&', text-acc)
             Just(s) -> text-acc := s.list.reverse ++ text-acc
@@ -322,7 +399,7 @@ pub fun tokenize(input: string, initial: tokenizer-state = Data, lastStartTag: m
           text-acc := Cons(c, text-acc)
       SRCDATA ->
         if c == '&' then
-          val (consumed, repl) = consume-char-ref(cs, i)
+          val (consumed, repl) = consume-char-ref(cs, i, False)
           match repl
             Nothing -> text-acc := Cons('&', text-acc)
             Just(s) -> text-acc := s.list.reverse ++ text-acc
@@ -560,6 +637,7 @@ pub fun tokenize(input: string, initial: tokenizer-state = Data, lastStartTag: m
           state := STagName
         else
           // Invalid end tag open; treat as text.
+          add-err("invalid-end-tag-open", i)
           text-acc := Cons('<', text-acc)
           text-acc := Cons('/', text-acc)
           reconsume(SData)
@@ -634,7 +712,7 @@ pub fun tokenize(input: string, initial: tokenizer-state = Data, lastStartTag: m
           finish-attr()
           state := SAfterAttrValueQ
         elif c == '&' then
-          val (consumed, repl) = consume-char-ref(cs, i)
+          val (consumed, repl) = consume-char-ref(cs, i, True)
           match repl
             Nothing -> cur-attr-value := Cons('&', cur-attr-value)
             Just(s) -> cur-attr-value := s.list.reverse ++ cur-attr-value
@@ -646,7 +724,7 @@ pub fun tokenize(input: string, initial: tokenizer-state = Data, lastStartTag: m
           finish-attr()
           state := SAfterAttrValueQ
         elif c == '&' then
-          val (consumed, repl) = consume-char-ref(cs, i)
+          val (consumed, repl) = consume-char-ref(cs, i, True)
           match repl
             Nothing -> cur-attr-value := Cons('&', cur-attr-value)
             Just(s) -> cur-attr-value := s.list.reverse ++ cur-attr-value
@@ -661,7 +739,7 @@ pub fun tokenize(input: string, initial: tokenizer-state = Data, lastStartTag: m
           finish-tag()
           state := SData
         elif c == '&' then
-          val (consumed, repl) = consume-char-ref(cs, i)
+          val (consumed, repl) = consume-char-ref(cs, i, True)
           match repl
             Nothing -> cur-attr-value := Cons('&', cur-attr-value)
             Just(s) -> cur-attr-value := s.list.reverse ++ cur-attr-value
@@ -708,4 +786,4 @@ pub fun tokenize(input: string, initial: tokenizer-state = Data, lastStartTag: m
     _ -> ()
   flush-text()
   out := Cons(TokEOF, out)
-  (out.reverse, Nil)
+  (out.reverse, errs.reverse)
