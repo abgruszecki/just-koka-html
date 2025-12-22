@@ -27,6 +27,11 @@ pub alias parseerror = errors/parseerror
 
 type st {
   SData
+  SRCDATA
+  SRAWTEXT
+  SScriptData
+  SPlaintext
+  SCDataSection
   STagOpen
   SMarkupDeclOpen
   SEndTagOpen
@@ -54,6 +59,16 @@ fun lower-ascii(c: char) : char
 
 fun is-ascii-alnum(c: char) : bool
   (c >= '0' && c <= '9') || is-ascii-alpha(c)
+
+fun is-ws(c: char) : bool
+  c == ' ' || c == '\n' || c == '\t' || c == '\r' || c == '\u000c'
+
+fun lower-ascii-string(s: string) : <div,exn> string
+  val cs = string/vector(s)
+  fun go(i: int, acc: list<char>) : <div,exn> list<char>
+    if i >= cs.length then acc.reverse
+    else go(i + 1, Cons(lower-ascii(cs[i]), acc))
+  string/listchar/string(go(0, Nil))
 
 fun starts-with-ci(cs: vector<char>, start: int, pat: string) : <div,exn> bool
   val ps = string/vector(pat)
@@ -162,6 +177,43 @@ fun consume-char-ref(cs: vector<char>, pos: int) : <div,exn> (consumed: int, rep
               Just(v) -> (j - pos, Just(v))
               Nothing -> (1, Nothing)
 
+fun consume-rawtext-endtag(cs: vector<char>, pos: int, lastStartTag: maybe<string>) : <div,exn> (consumed: int, tag: maybe<string>)
+  // `pos` is the index of '<' in one of the rawtext-ish states.
+  match lastStartTag
+    Nothing -> (0, Nothing)
+    Just(last0) ->
+      {
+        val last = lower-ascii-string(last0.trim)
+        val len = cs.length
+        if pos + 2 >= len then (0, Nothing)
+        elif cs[pos] != '<' || cs[pos + 1] != '/' then (0, Nothing)
+        else
+          {
+            val j0 = pos + 2
+            if j0 >= len then (0, Nothing)
+            else if is-ascii-alpha(cs[j0]) then
+              {
+                fun scan-name(j: int, acc: list<char>) : <div,exn> (j: int, name: string)
+                  if j < len && is-ascii-alnum(cs[j]) then
+                    scan-name(j + 1, Cons(lower-ascii(cs[j]), acc))
+                  else
+                    (j, string/listchar/string(acc.reverse))
+
+                fun scan-ws(j: int) : <div,exn> int
+                  if j < len && is-ws(cs[j]) then scan-ws(j + 1) else j
+
+                val (j1, name) = scan-name(j0, Nil)
+                val k = scan-ws(j1)
+                if k < len && cs[k] == '>' && name != "" && name == last then
+                  (k - pos + 1, Just(name))
+                else
+                  (0, Nothing)
+              }
+            else
+              (0, Nothing)
+          }
+      }
+
 // M1: a pragmatic subset tokenizer (enough to start enabling non-entity tag/text tests).
 pub fun tokenize(input: string, initial: tokenizer-state = Data, lastStartTag: maybe<string> = Nothing)
   : <div,exn> (tokens: list<token>, errors: list<parseerror>)
@@ -216,7 +268,11 @@ pub fun tokenize(input: string, initial: tokenizer-state = Data, lastStartTag: m
   fun map-initial(s: tokenizer-state) : st
     match s
       Data -> SData
-      _ -> SData
+      PLAINTEXT -> SPlaintext
+      RCDATA -> SRCDATA
+      RAWTEXT -> SRAWTEXT
+      ScriptData -> SScriptData
+      CDATASection -> SCDataSection
 
   var state := map-initial(initial)
   var i := 0
@@ -237,6 +293,58 @@ pub fun tokenize(input: string, initial: tokenizer-state = Data, lastStartTag: m
             Nothing -> text-acc := Cons('&', text-acc)
             Just(s) -> text-acc := s.list.reverse ++ text-acc
           i := i + consumed - 1
+        else
+          text-acc := Cons(c, text-acc)
+      SRCDATA ->
+        if c == '&' then
+          val (consumed, repl) = consume-char-ref(cs, i)
+          match repl
+            Nothing -> text-acc := Cons('&', text-acc)
+            Just(s) -> text-acc := s.list.reverse ++ text-acc
+          i := i + consumed - 1
+        elif c == '<' then
+          val (consumed, tag) = consume-rawtext-endtag(cs, i, lastStartTag)
+          match tag
+            Nothing -> text-acc := Cons('<', text-acc)
+            Just(name) ->
+              {
+                emit-token(TokEndTag(name))
+                state := SData
+                i := i + consumed - 1
+              }
+        else
+          text-acc := Cons(c, text-acc)
+      SRAWTEXT ->
+        if c == '<' then
+          val (consumed, tag) = consume-rawtext-endtag(cs, i, lastStartTag)
+          match tag
+            Nothing -> text-acc := Cons('<', text-acc)
+            Just(name) ->
+              {
+                emit-token(TokEndTag(name))
+                state := SData
+                i := i + consumed - 1
+              }
+        else
+          text-acc := Cons(c, text-acc)
+      SScriptData ->
+        if c == '<' then
+          val (consumed, tag) = consume-rawtext-endtag(cs, i, lastStartTag)
+          match tag
+            Nothing -> text-acc := Cons('<', text-acc)
+            Just(name) ->
+              {
+                emit-token(TokEndTag(name))
+                state := SData
+                i := i + consumed - 1
+              }
+        else
+          text-acc := Cons(c, text-acc)
+      SPlaintext ->
+        text-acc := Cons(c, text-acc)
+      SCDataSection ->
+        if (c == ']' && i + 2 < cs.length && cs[i + 1] == ']' && cs[i + 2] == '>') then
+          { state := SData; i := i + 2 }
         else
           text-acc := Cons(c, text-acc)
       STagOpen ->

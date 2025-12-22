@@ -3,8 +3,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import subprocess
-import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -16,38 +14,10 @@ from html5lib_allowlists import (
     count_tokenizer_cases,
     discover_tokenizer_fixtures,
 )
+from run_html5lib_tests import build_runner, run_tokenizer_cases_batch, _state_arg_from_html5lib
 
 
 ROOT = repo_root_from_tools_path()
-
-
-def build_runner(exe: Path) -> None:
-    exe.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(
-        ["koka", "--rebuild", "--include=src", "-O2", "-o", str(exe), "src/cli.kk"],
-        cwd=str(ROOT),
-        check=True,
-    )
-    exe.chmod(0o755)
-
-
-def run_tokenizer_case(exe: Path, case: dict[str, Any]) -> list[Any] | None:
-    if (case.get("initialStates") or ["Data state"]) != ["Data state"]:
-        return None
-    if case.get("errors"):
-        return None
-    input_text = case["input"]
-    with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as f:
-        f.write(input_text)
-        input_path = f.name
-    proc = subprocess.run(
-        [str(exe), "tokenizer", "Data", "-", input_path],
-        cwd=str(ROOT),
-        check=True,
-        stdout=subprocess.PIPE,
-        text=True,
-    )
-    return json.loads(proc.stdout)
 
 
 def main() -> int:
@@ -69,13 +39,28 @@ def main() -> int:
         tests = payload.get("tests") or payload.get("xmlViolationTests") or []
         assert len(tests) == count_tokenizer_cases(p)
 
-        passing: list[int] = []
+        expanded: list[dict[str, Any]] = []
+        mapping: list[tuple[int, list[Any]]] = []
         for idx, case in enumerate(tests):
-            got = run_tokenizer_case(exe, case)
-            if got is None:
+            state_names = case.get("initialStates") or ["Data state"]
+            last = case.get("lastStartTag") or "-"
+            try:
+                states = [_state_arg_from_html5lib(s) for s in state_names]
+            except Exception:
                 continue
-            if got == case["output"]:
-                passing.append(idx)
+            for st in states:
+                expanded.append({"state": st, "last": last, "input": case["input"]})
+                mapping.append((idx, case["output"]))
+
+        # A case "passes" only if it matches expected output for every initialState entry.
+        ok = [True] * len(tests)
+        if expanded:
+            got_batch = run_tokenizer_cases_batch(exe, expanded)
+            for (idx, expected), got in zip(mapping, got_batch, strict=True):
+                if got != expected:
+                    ok[idx] = False
+
+        passing = [idx for idx, is_ok in enumerate(ok) if is_ok]
 
         before = len(data["tokenizer"].get(fx, []))
         data["tokenizer"][fx] = sorted(passing)

@@ -25,14 +25,26 @@ def build_runner(exe: Path) -> None:
     exe.chmod(0o755)
 
 
+def _state_arg_from_html5lib(name: str) -> str:
+    name = name.strip()
+    m = {
+        "Data state": "Data",
+        "PLAINTEXT state": "PLAINTEXT",
+        "RCDATA state": "RCDATA",
+        "RAWTEXT state": "RAWTEXT",
+        "Script data state": "ScriptData",
+        "CDATA section state": "CDATASection",
+    }
+    if name not in m:
+        raise RuntimeError(f"unsupported initialStates entry: {name!r}")
+    return m[name]
+
+
 def run_tokenizer_cases_batch(exe: Path, cases: list[dict[str, Any]]) -> list[list[Any]]:
     lines: list[str] = [str(len(cases))]
     for case in cases:
-        state_names = case.get("initialStates") or ["Data state"]
-        if state_names != ["Data state"]:
-            raise RuntimeError("non-Data initialStates not supported yet")
-        state = "Data"
-        last = case.get("lastStartTag") or "-"
+        state = case["state"]
+        last = case.get("last") or "-"
         payload = base64.b64encode(case["input"].encode("utf-8", "surrogatepass")).decode("ascii")
         lines.append(f"{state}\t{last}\t{len(payload)}")
         chunk_size = 900  # Koka std/os/readline caps at 1023 chars.
@@ -160,17 +172,25 @@ def main() -> int:
             continue
         payload = json.loads((tok_dir / fx).read_text(encoding="utf-8"))
         tests = payload.get("tests") or payload.get("xmlViolationTests") or []
-        batch = [tests[idx] for idx in enabled]
+        expanded: list[dict[str, Any]] = []
+        expect: list[tuple[int, str, list[Any]]] = []
+        for idx in enabled:
+            case = tests[idx]
+            state_names = case.get("initialStates") or ["Data state"]
+            last = case.get("lastStartTag") or "-"
+            for st_name in state_names:
+                st = _state_arg_from_html5lib(st_name)
+                expanded.append({"state": st, "last": last, "input": case["input"]})
+                expect.append((idx, st, case["output"]))
         try:
-            got_batch = run_tokenizer_cases_batch(exe, batch)
+            got_batch = run_tokenizer_cases_batch(exe, expanded)
         except Exception as e:  # noqa: BLE001
             failures.append(f"tokenizer {fx}: runner failed: {e}")
             continue
 
-        for idx, got in zip(enabled, got_batch, strict=True):
-            expected = tests[idx]["output"]
+        for (idx, st, expected), got in zip(expect, got_batch, strict=True):
             if got != expected:
-                failures.append(f"tokenizer {fx} #{idx}: mismatch")
+                failures.append(f"tokenizer {fx} #{idx} ({st}): mismatch")
 
     tree_dir = ROOT / "html5lib-tests" / "tree-construction"
     for fx in sorted({*data["tree"]["doc"].keys(), *data["tree"]["frag"].keys()}):

@@ -63,10 +63,11 @@ fun token-json(t: tokenizer/token) : <div,exn> string
 fun run-tokenizer(args: list<string>) : <console,fsys,div,exn> ()
   // args: tokenizer <state> <lastStartTagOr-> <inputPath>
   val stateArg = args.drop(1).head("Data")
-  val _last = args.drop(2).head("-")
+  val lastArg = args.drop(2).head("-")
   val pathStr = args.drop(3).head("")
   val input = read-text-file(path(pathStr))
-  val (tokens, _errors) = tokenizer/tokenize(input, state-from-arg(stateArg))
+  val last = if lastArg == "-" then Nothing else Just(lastArg)
+  val (tokens, _errors) = tokenizer/tokenize(input, state-from-arg(stateArg), last)
   // Drop EOF for html5lib comparison (EOF isn't in expected outputs).
   val toks = tokens.filter(fn(t) match t { TokEOF -> False; _ -> True })
   val out = json/arr(toks.map(token-json))
@@ -90,7 +91,7 @@ fun run-tokenizer-batch() : <console,div,exn> ()
       val header = readline()
       val parts = string/sep/split(header, "\t")
       match parts
-        Cons(stateArg, Cons(_last, Cons(lenStr, _rest))) ->
+        Cons(stateArg, Cons(lastArg, Cons(lenStr, _rest))) ->
           {
             val b64len = lenStr.trim.parse-int.default(-1)
             if b64len < 0 then exn/throw("invalid base64 length")
@@ -98,7 +99,8 @@ fun run-tokenizer-batch() : <console,div,exn> ()
             val b64 = chunks.reverse.join("")
             if b64.count != b64len then exn/throw("base64 length mismatch")
             val input = base64/decode-utf8(b64)
-            val (tokens, _errors) = tokenizer/tokenize(input, state-from-arg(stateArg))
+            val last = if lastArg == "-" then Nothing else Just(lastArg)
+            val (tokens, _errors) = tokenizer/tokenize(input, state-from-arg(stateArg), last)
             val toks = tokens.filter(fn(t) match t { TokEOF -> False; _ -> True })
             val out = json/arr(toks.map(token-json))
             go(i + 1, Cons(out, outs))
