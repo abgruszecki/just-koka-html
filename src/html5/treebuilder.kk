@@ -25,6 +25,7 @@ type mode {
   BeforeHtml
   BeforeHead
   InHead
+  InHeadNoscript
   AfterHead
   InBody
   InTable
@@ -379,7 +380,7 @@ fun build-tree(tokens: list<token>, initial: frame) : <div,exn> (children: list<
       _ -> Nil
   (children, errs)
 
-pub fun build-document(tokens: list<token>) : <div,exn> (dom, int)
+pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <div,exn> (dom, int)
   // M2: a minimal insertion-mode document builder.
   // Goal: reliably synthesize <html><head><body> even when wrappers are missing or partial.
 
@@ -742,7 +743,15 @@ pub fun build-document(tokens: list<token>) : <div,exn> (dom, int)
                 val st1 = ensure-body(st(stack1, InBody, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors), attrs)
                 (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False)
               }
-            elif name == "title" || name == "style" || name == "script" || name == "noscript" || name == "template" then
+            elif name == "noscript" then
+              {
+                val st1 = start-tag(st0, name, attrs, selfClosing)
+                if scriptingEnabled then
+                  (st(st1.stack, InHeadNoscript, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False)
+                else
+                  (st1, False)
+              }
+            elif name == "title" || name == "style" || name == "script" || name == "noframes" || name == "template" then
               (start-tag(st0, name, attrs, selfClosing), False)
             elif name == "base" || name == "basefont" || name == "bgsound" || name == "link" || name == "meta" then
               (start-tag(st0, name, attrs, selfClosing), False)
@@ -757,6 +766,29 @@ pub fun build-document(tokens: list<token>) : <div,exn> (dom, int)
           TokDoctype(_,_,_,_) -> (st0, False)
           TokEOF ->
             { val stack1 = pop-to(st0.stack, "head"); (st(stack1, AfterHead, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors), True) }
+      InHeadNoscript ->
+        match t
+          TokEndTag(name) ->
+            if name == "noscript" then
+              { val st1 = end-tag(st0, "noscript"); (st(st1.stack, InHead, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False) }
+            else
+              (add-error(st0), False)
+          TokStartTag(name, attrs, selfClosing) ->
+            if name == "html" then (st0, False)
+            elif name == "head" || name == "noscript" then (add-error(st0), False)
+            elif name == "base" || name == "basefont" || name == "bgsound" || name == "link" || name == "meta" || name == "noframes" || name == "style" then
+              (start-tag(st(st0.stack, InHead, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors), name, attrs, selfClosing), False)
+            else
+              { val stack1 = pop-to(st0.stack, "noscript"); (st(stack1, InHead, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors), True) }
+          TokCharacter(s) ->
+            if is-ws(s) then
+              (append(st0, TText(s)), False)
+            else
+              { val stack1 = pop-to(st0.stack, "noscript"); (st(stack1, InHead, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors), True) }
+          TokComment(data) -> (append(st0, TComment(data)), False)
+          TokDoctype(_,_,_,_) -> (add-error(st0), False)
+          TokEOF ->
+            { val stack1 = pop-to(st0.stack, "noscript"); (st(stack1, InHead, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors), True) }
       AfterHead ->
         match t
           TokComment(data) -> (append(st0, TComment(data)), False)

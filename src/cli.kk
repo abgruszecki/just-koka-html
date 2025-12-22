@@ -166,7 +166,7 @@ fun run-tree-batch() : <console,div,exn> ()
       val header = readline()
       val parts = string/sep/split(header, "\t")
       match parts
-        Cons(kind, Cons(ctxStr, Cons(_script, Cons(lenStr, _rest)))) ->
+        Cons(kind, Cons(ctxStr, Cons(scriptArg, Cons(lenStr, _rest)))) ->
           {
             val b64len = lenStr.trim.parse-int.default(-1)
             if b64len < 0 then exn/throw("invalid base64 length")
@@ -174,11 +174,13 @@ fun run-tree-batch() : <console,div,exn> ()
             val b64 = chunks.reverse.join("")
             if b64.count != b64len then exn/throw("base64 length mismatch")
             val input = base64/decode-utf8(b64)
+            val scripting = (scriptArg != "off")
+            val opts = html5/Parseoptions(True, False, scripting, False)
             val res =
               if kind == "frag" then
-                html5/parse-fragment(input, parsefragmentcontext(ctxStr))
+                html5/parse-fragment(input, parsefragmentcontext(ctxStr), opts)
               else
-                html5/parse(input)
+                html5/parse(input, opts)
             val dump = html5/to-test-format(res.dom)
             val out = tree-case-json(dump, res.errors.length)
             go(i + 1, Cons(out, outs))

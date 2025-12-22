@@ -35,7 +35,7 @@ fun is-ws-only(s: string) : <div,exn> bool
 
 pub fun parse(html: string, opts: parseoptions = default-parse-options) : <div,exn> parseresult
   val (tokens, errors) = tokenizer/tokenize-for-parse(html, Data)
-  val (dom, treeErrCount) = treebuilder/build-document(tokens)
+  val (dom, treeErrCount) = treebuilder/build-document(tokens, opts.scripting-enabled)
   // Tree construction tests only check parse error *counts*; start by matching the common "missing doctype" case.
   fun saw-leading-doctype(ts: list<tokenizer/token>) : <div,exn> bool
     match ts
