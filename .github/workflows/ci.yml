@@ -30,6 +30,8 @@ jobs:
       - name: Smoke test
         run: python3 tools/run_tests.py
 
+      - name: html5lib allowlisted tests
+        run: python3 tools/run_html5lib_tests.py --build
+
       - name: Prevent allowlist regressions
         run: python3 tools/html5lib_allowlists_cli.py diff-prev --fail-on-decrease
-
