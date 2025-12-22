@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import html
-import json
 from pathlib import Path
 
 
@@ -10,9 +9,41 @@ ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "src" / "html5" / "entities.kk"
 
 
+_UNSAFE_CODEPOINTS: set[int] = {
+    # Bidirectional control characters (often rejected by parsers for safety).
+    0x061C,  # ARABIC LETTER MARK
+    0x200E,  # LRM
+    0x200F,  # RLM
+    *range(0x202A, 0x202F),  # LRE..RLO + PDF + LRM/RLM neighbors
+    *range(0x2066, 0x206A),  # LRI..PDI
+    0xFEFF,  # BOM / ZWNBSP
+    0x2028,  # LS
+    0x2029,  # PS
+}
+
+
 def kk_escape_string(s: str) -> str:
-    # Koka string literals are close enough to JSON for our needs.
-    return json.dumps(s, ensure_ascii=True)
+    # Koka accepts UTF-8 source for non-BMP codepoints, but it rejects some
+    # "unsafe" codepoints in string literals. Emit those as \uXXXX escapes.
+    out: list[str] = ['"']
+    for ch in s:
+        cp = ord(ch)
+        if ch == '"':
+            out.append('\\"')
+        elif ch == "\\":
+            out.append("\\\\")
+        elif ch == "\n":
+            out.append("\\n")
+        elif ch == "\r":
+            out.append("\\r")
+        elif ch == "\t":
+            out.append("\\t")
+        elif cp < 0x20 or cp in _UNSAFE_CODEPOINTS:
+            out.append(f"\\u{cp:04x}")
+        else:
+            out.append(ch)
+    out.append('"')
+    return "".join(out)
 
 
 def main() -> int:

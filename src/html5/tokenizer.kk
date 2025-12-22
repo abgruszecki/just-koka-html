@@ -30,6 +30,15 @@ type st {
   SRCDATA
   SRAWTEXT
   SScriptData
+  SRCDATALessThanSign
+  SRCDATAEndTagOpen
+  SRCDATAEndTagName
+  SRAWTEXTLessThanSign
+  SRAWTEXTEndTagOpen
+  SRAWTEXTEndTagName
+  SScriptDataLessThanSign
+  SScriptDataEndTagOpen
+  SScriptDataEndTagName
   SPlaintext
   SCDataSection
   STagOpen
@@ -45,7 +54,13 @@ type st {
   SAttrValueUQ
   SAfterAttrValueQ
   SSelfClosingStartTag
+  SCommentStart
+  SCommentStartDash
   SComment
+  SCommentEndDash
+  SCommentEnd
+  SCommentEndBang
+  SBogusComment
   SBeforeDoctypeName
   SDoctypeName
   SAfterDoctypeName
@@ -317,6 +332,7 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
   var cur-attr-name : list<char> := Nil
   var cur-attr-value : list<char> := Nil
   var in-attr := False
+  var temp-buffer : list<char> := Nil  // for rawtext/RCDATA/script end tag matching
 
   // Output
   var out : list<token> := Nil
@@ -374,6 +390,22 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
     cur-attrs := Nil
     cur-selfclosing := False
 
+  fun is-appropriate-end-tag(ls: maybe<string>, tmp: list<char>) : <div,exn> bool
+    match ls
+      Nothing -> False
+      Just(last0) ->
+        {
+          val want = lower-ascii-string(last0.trim)
+          val got = string/listchar/string(tmp.reverse)
+          got != "" && got == want
+        }
+
+  fun emit-temp-as-text()
+    val tag = string/listchar/string(temp-buffer.reverse)
+    val seq = "</".list ++ tag.list
+    text-acc := seq.reverse ++ text-acc
+    temp-buffer := Nil
+
   fun emit-doctype()
     val name = string/listchar/string(doctype-name.reverse).trim
     emit-token(TokDoctype(name, doctype-public, doctype-system, doctype-force))
@@ -421,43 +453,95 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
             Just(s) -> text-acc := s.list.reverse ++ text-acc
           i := i + consumed - 1
         elif c == '<' then
-          val (consumed, tag) = consume-rawtext-endtag(cs, i, last-start)
-          match tag
-            Nothing -> text-acc := Cons('<', text-acc)
-            Just(name) ->
-              {
-                emit-token(TokEndTag(name))
-                state := SData
-                i := i + consumed - 1
-              }
+          state := SRCDATALessThanSign
         else
           text-acc := Cons(c, text-acc)
       SRAWTEXT ->
         if c == '<' then
-          val (consumed, tag) = consume-rawtext-endtag(cs, i, last-start)
-          match tag
-            Nothing -> text-acc := Cons('<', text-acc)
-            Just(name) ->
-              {
-                emit-token(TokEndTag(name))
-                state := SData
-                i := i + consumed - 1
-              }
+          state := SRAWTEXTLessThanSign
         else
           text-acc := Cons(c, text-acc)
       SScriptData ->
         if c == '<' then
-          val (consumed, tag) = consume-rawtext-endtag(cs, i, last-start)
-          match tag
-            Nothing -> text-acc := Cons('<', text-acc)
-            Just(name) ->
-              {
-                emit-token(TokEndTag(name))
-                state := SData
-                i := i + consumed - 1
-              }
+          state := SScriptDataLessThanSign
         else
           text-acc := Cons(c, text-acc)
+      SRCDATALessThanSign ->
+        if c == '/' then
+          { temp-buffer := Nil; cur-is-end := True; cur-name := Nil; state := SRCDATAEndTagOpen }
+        else
+          { text-acc := Cons('<', text-acc); reconsume(SRCDATA) }
+      SRCDATAEndTagOpen ->
+        if is-ascii-alpha(c) then
+          { temp-buffer := Cons(lower-ascii(c), Nil); cur-name := Cons(lower-ascii(c), Nil); cur-is-end := True; state := SRCDATAEndTagName }
+        else
+          { text-acc := Cons('/', text-acc); text-acc := Cons('<', text-acc); reconsume(SRCDATA) }
+      SRCDATAEndTagName ->
+        if is-ascii-alnum(c) then
+          { temp-buffer := Cons(lower-ascii(c), temp-buffer); cur-name := Cons(lower-ascii(c), cur-name) }
+        elif (is-ws(c) || c == '/' || c == '>') then
+          if is-appropriate-end-tag(last-start, temp-buffer) then
+            if c == '>' then
+              { emit-token(TokEndTag(string/listchar/string(temp-buffer.reverse))); temp-buffer := Nil; state := SData }
+            elif c == '/' then
+              // html5lib tokenizer expects appropriate end tags to be "accepted" even if EOF happens here.
+              { state := SSelfClosingStartTag }
+            else
+              { state := SBeforeAttrName }
+          else
+            { emit-temp-as-text(); reconsume(SRCDATA) }
+        else
+          { emit-temp-as-text(); reconsume(SRCDATA) }
+      SRAWTEXTLessThanSign ->
+        if c == '/' then
+          { temp-buffer := Nil; cur-is-end := True; cur-name := Nil; state := SRAWTEXTEndTagOpen }
+        else
+          { text-acc := Cons('<', text-acc); reconsume(SRAWTEXT) }
+      SRAWTEXTEndTagOpen ->
+        if is-ascii-alpha(c) then
+          { temp-buffer := Cons(lower-ascii(c), Nil); cur-name := Cons(lower-ascii(c), Nil); cur-is-end := True; state := SRAWTEXTEndTagName }
+        else
+          { text-acc := Cons('/', text-acc); text-acc := Cons('<', text-acc); reconsume(SRAWTEXT) }
+      SRAWTEXTEndTagName ->
+        if is-ascii-alnum(c) then
+          { temp-buffer := Cons(lower-ascii(c), temp-buffer); cur-name := Cons(lower-ascii(c), cur-name) }
+        elif (is-ws(c) || c == '/' || c == '>') then
+          if is-appropriate-end-tag(last-start, temp-buffer) then
+            if c == '>' then
+              { emit-token(TokEndTag(string/listchar/string(temp-buffer.reverse))); temp-buffer := Nil; state := SData }
+            elif c == '/' then
+              { state := SSelfClosingStartTag }
+            else
+              { state := SBeforeAttrName }
+          else
+            { emit-temp-as-text(); reconsume(SRAWTEXT) }
+        else
+          { emit-temp-as-text(); reconsume(SRAWTEXT) }
+      SScriptDataLessThanSign ->
+        if c == '/' then
+          { temp-buffer := Nil; cur-is-end := True; cur-name := Nil; state := SScriptDataEndTagOpen }
+        else
+          { text-acc := Cons('<', text-acc); reconsume(SScriptData) }
+      SScriptDataEndTagOpen ->
+        if is-ascii-alpha(c) then
+          { temp-buffer := Cons(lower-ascii(c), Nil); cur-name := Cons(lower-ascii(c), Nil); cur-is-end := True; state := SScriptDataEndTagName }
+        else
+          { text-acc := Cons('/', text-acc); text-acc := Cons('<', text-acc); reconsume(SScriptData) }
+      SScriptDataEndTagName ->
+        if is-ascii-alnum(c) then
+          { temp-buffer := Cons(lower-ascii(c), temp-buffer); cur-name := Cons(lower-ascii(c), cur-name) }
+        elif (is-ws(c) || c == '/' || c == '>') then
+          if is-appropriate-end-tag(last-start, temp-buffer) then
+            if c == '>' then
+              { emit-token(TokEndTag(string/listchar/string(temp-buffer.reverse))); temp-buffer := Nil; state := SData }
+            elif c == '/' then
+              { state := SSelfClosingStartTag }
+            else
+              { state := SBeforeAttrName }
+          else
+            { emit-temp-as-text(); reconsume(SScriptData) }
+        else
+          { emit-temp-as-text(); reconsume(SScriptData) }
       SPlaintext ->
         text-acc := Cons(c, text-acc)
       SCDataSection ->
@@ -486,7 +570,7 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
         if (c == '-' && i + 2 < cs.length && cs[i + 1] == '-' ) then
           // Consume "<!--"
           comment-acc := Nil
-          state := SComment
+          state := SCommentStart
           i := i + 1
         elif starts-with-ci(cs, i, "DOCTYPE") then
           // Consume "<!DOCTYPE"
@@ -498,15 +582,59 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
           state := SBeforeDoctypeName
           i := i + 6
         else
-          // Not a known declaration; emit "<!" and reconsume.
-          text-acc := Cons('!', text-acc)
-          text-acc := Cons('<', text-acc)
-          reconsume(SData)
+          // Not a known declaration; parse as bogus comment.
+          comment-acc := Nil
+          state := SBogusComment
+          reconsume(SBogusComment)
+      SCommentStart ->
+        if c == '-' then
+          state := SCommentStartDash
+        elif c == '>' then
+          { emit-token(TokComment("")); state := SData }
+        else
+          { comment-acc := Cons(c, comment-acc); state := SComment }
+      SCommentStartDash ->
+        if c == '-' then
+          state := SCommentEnd
+        elif c == '>' then
+          { emit-token(TokComment("")); state := SData }
+        else
+          { comment-acc := Cons('-', comment-acc); comment-acc := Cons(c, comment-acc); state := SComment }
       SComment ->
-        if (c == '-' && i + 2 < cs.length && cs[i + 1] == '-' && cs[i + 2] == '>') then
-          emit-token(TokComment(string/listchar/string(comment-acc.reverse)))
-          state := SData
-          i := i + 2
+        if c == '-' then
+          state := SCommentEndDash
+        else
+          comment-acc := Cons(c, comment-acc)
+      SCommentEndDash ->
+        if c == '-' then
+          state := SCommentEnd
+        else
+          { comment-acc := Cons('-', comment-acc); comment-acc := Cons(c, comment-acc); state := SComment }
+      SCommentEnd ->
+        if c == '>' then
+          { emit-token(TokComment(string/listchar/string(comment-acc.reverse))); state := SData }
+        elif c == '!' then
+          state := SCommentEndBang
+        elif c == '-' then
+          comment-acc := Cons('-', comment-acc)
+        else
+          {
+            // "--" was part of the comment; emit and continue.
+            comment-acc := Cons('-', comment-acc)
+            comment-acc := Cons('-', comment-acc)
+            comment-acc := Cons(c, comment-acc)
+            state := SComment
+          }
+      SCommentEndBang ->
+        if c == '>' then
+          { emit-token(TokComment(string/listchar/string(comment-acc.reverse))); state := SData }
+        elif c == '-' then
+          { comment-acc := Cons('-', comment-acc); comment-acc := Cons('-', comment-acc); comment-acc := Cons('!', comment-acc); state := SCommentEndDash }
+        else
+          { comment-acc := Cons('-', comment-acc); comment-acc := Cons('-', comment-acc); comment-acc := Cons('!', comment-acc); comment-acc := Cons(c, comment-acc); state := SComment }
+      SBogusComment ->
+        if c == '>' then
+          { emit-token(TokComment(string/listchar/string(comment-acc.reverse))); state := SData }
         else
           comment-acc := Cons(c, comment-acc)
       SBeforeDoctypeName ->
@@ -775,6 +903,22 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
 
   // EOF
   match state
+    SRCDATALessThanSign -> text-acc := Cons('<', text-acc)
+    SRAWTEXTLessThanSign -> text-acc := Cons('<', text-acc)
+    SScriptDataLessThanSign -> text-acc := Cons('<', text-acc)
+    SRCDATAEndTagName -> emit-temp-as-text()
+    SRAWTEXTEndTagName -> emit-temp-as-text()
+    SScriptDataEndTagName -> emit-temp-as-text()
+    SCommentStart -> emit-token(TokComment(""))
+    SCommentStartDash -> emit-token(TokComment(""))
+    SComment -> emit-token(TokComment(string/listchar/string(comment-acc.reverse)))
+    SCommentEndDash ->
+      { comment-acc := Cons('-', comment-acc); emit-token(TokComment(string/listchar/string(comment-acc.reverse))) }
+    SCommentEnd ->
+      { comment-acc := Cons('-', comment-acc); comment-acc := Cons('-', comment-acc); emit-token(TokComment(string/listchar/string(comment-acc.reverse))) }
+    SCommentEndBang ->
+      { comment-acc := Cons('-', comment-acc); comment-acc := Cons('-', comment-acc); comment-acc := Cons('!', comment-acc); emit-token(TokComment(string/listchar/string(comment-acc.reverse))) }
+    SBogusComment -> emit-token(TokComment(string/listchar/string(comment-acc.reverse)))
     SBeforeDoctypeName -> { doctype-force := True; emit-doctype() }
     SDoctypeName -> { doctype-force := True; emit-doctype() }
     SAfterDoctypeName -> { doctype-force := True; emit-doctype() }
