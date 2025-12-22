@@ -445,7 +445,12 @@ pub fun build-document(tokens: list<token>) : <div,exn> (dom, int)
             if name == "body" then
               { val st1 = end-tag(st0, "body"); (st(st1.stack, AfterBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False) }
             elif name == "html" then (st0, False)
-            else (end-tag(st0, name), False)
+            else
+              if has-open(st0.stack, name) then
+                (end-tag(st0, name), False)
+              else
+                // Treat stray end tags as parse errors (html5lib tree tests count these).
+                (st(st0.stack, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors + 1), False)
           TokCharacter(s) ->
             if s == "" then (st0, False) else (append(st0, TText(s)), False)
           TokComment(data) -> (append(st0, TComment(data)), False)
