@@ -49,6 +49,18 @@ type st {
   SBeforeDoctypeName
   SDoctypeName
   SAfterDoctypeName
+  SAfterDoctypePublicKeyword
+  SBeforeDoctypePublicId
+  SDoctypePublicIdDQ
+  SDoctypePublicIdSQ
+  SAfterDoctypePublicId
+  SBetweenDoctypePublicAndSystemId
+  SAfterDoctypeSystemKeyword
+  SBeforeDoctypeSystemId
+  SDoctypeSystemIdDQ
+  SDoctypeSystemIdSQ
+  SAfterDoctypeSystemId
+  SBogusDoctype
 }
 
 fun is-ascii-alpha(c: char) : bool
@@ -233,6 +245,10 @@ pub fun tokenize(input: string, initial: tokenizer-state = Data, lastStartTag: m
   var text-acc : list<char> := Nil
   var comment-acc : list<char> := Nil
   var doctype-name : list<char> := Nil
+  var doctype-public : maybe<string> := Nothing
+  var doctype-system : maybe<string> := Nothing
+  var doctype-force := False
+  var doctype-id-acc : list<char> := Nil
   fun flush-text()
     if text-acc != Nil then
       out := Cons(TokCharacter(string/listchar/string(text-acc.reverse)), out)
@@ -264,6 +280,15 @@ pub fun tokenize(input: string, initial: tokenizer-state = Data, lastStartTag: m
     cur-name := Nil
     cur-attrs := Nil
     cur-selfclosing := False
+
+  fun emit-doctype()
+    val name = string/listchar/string(doctype-name.reverse)
+    emit-token(TokDoctype(name, doctype-public, doctype-system, doctype-force))
+    doctype-name := Nil
+    doctype-public := Nothing
+    doctype-system := Nothing
+    doctype-force := False
+    doctype-id-acc := Nil
 
   fun map-initial(s: tokenizer-state) : st
     match s
@@ -373,6 +398,10 @@ pub fun tokenize(input: string, initial: tokenizer-state = Data, lastStartTag: m
         elif starts-with-ci(cs, i, "DOCTYPE") then
           // Consume "<!DOCTYPE"
           doctype-name := Nil
+          doctype-public := Nothing
+          doctype-system := Nothing
+          doctype-force := False
+          doctype-id-acc := Nil
           state := SBeforeDoctypeName
           i := i + 6
         else
@@ -388,26 +417,139 @@ pub fun tokenize(input: string, initial: tokenizer-state = Data, lastStartTag: m
         else
           comment-acc := Cons(c, comment-acc)
       SBeforeDoctypeName ->
-        if c == ' ' || c == '\n' || c == '\t' || c == '\r' then
+        if is-ws(c) then
           ()
         elif c == '>' then
-          emit-token(TokDoctype("", Nothing, Nothing, False))
+          doctype-force := True
+          emit-doctype()
           state := SData
         else
           doctype-name := Cons(lower-ascii(c), Nil)
           state := SDoctypeName
       SDoctypeName ->
         if c == '>' then
-          emit-token(TokDoctype(string/listchar/string(doctype-name.reverse), Nothing, Nothing, False))
+          emit-doctype()
           state := SData
-        elif c == ' ' || c == '\n' || c == '\t' || c == '\r' then
+        elif is-ws(c) then
           state := SAfterDoctypeName
         else
           doctype-name := Cons(lower-ascii(c), doctype-name)
       SAfterDoctypeName ->
-        if c == '>' then
-          emit-token(TokDoctype(string/listchar/string(doctype-name.reverse), Nothing, Nothing, False))
+        if is-ws(c) then
+          ()
+        elif c == '>' then
+          emit-doctype()
           state := SData
+        elif starts-with-ci(cs, i, "PUBLIC") then
+          { state := SAfterDoctypePublicKeyword; i := i + 5 }
+        elif starts-with-ci(cs, i, "SYSTEM") then
+          { state := SAfterDoctypeSystemKeyword; i := i + 5 }
+        else
+          { doctype-force := True; state := SBogusDoctype }
+      SAfterDoctypePublicKeyword ->
+        if is-ws(c) then
+          state := SBeforeDoctypePublicId
+        elif c == '"' then
+          { doctype-id-acc := Nil; state := SDoctypePublicIdDQ }
+        elif c == '\'' then
+          { doctype-id-acc := Nil; state := SDoctypePublicIdSQ }
+        elif c == '>' then
+          { doctype-force := True; emit-doctype(); state := SData }
+        else
+          { doctype-force := True; state := SBogusDoctype }
+      SBeforeDoctypePublicId ->
+        if is-ws(c) then
+          ()
+        elif c == '"' then
+          { doctype-id-acc := Nil; state := SDoctypePublicIdDQ }
+        elif c == '\'' then
+          { doctype-id-acc := Nil; state := SDoctypePublicIdSQ }
+        elif c == '>' then
+          { doctype-force := True; emit-doctype(); state := SData }
+        else
+          { doctype-force := True; state := SBogusDoctype }
+      SDoctypePublicIdDQ ->
+        if c == '"' then
+          { doctype-public := Just(string/listchar/string(doctype-id-acc.reverse)); doctype-id-acc := Nil; state := SAfterDoctypePublicId }
+        elif c == '>' then
+          { doctype-force := True; doctype-public := Just(string/listchar/string(doctype-id-acc.reverse)); emit-doctype(); state := SData }
+        else
+          doctype-id-acc := Cons(c, doctype-id-acc)
+      SDoctypePublicIdSQ ->
+        if c == '\'' then
+          { doctype-public := Just(string/listchar/string(doctype-id-acc.reverse)); doctype-id-acc := Nil; state := SAfterDoctypePublicId }
+        elif c == '>' then
+          { doctype-force := True; doctype-public := Just(string/listchar/string(doctype-id-acc.reverse)); emit-doctype(); state := SData }
+        else
+          doctype-id-acc := Cons(c, doctype-id-acc)
+      SAfterDoctypePublicId ->
+        if is-ws(c) then
+          state := SBetweenDoctypePublicAndSystemId
+        elif c == '>' then
+          { emit-doctype(); state := SData }
+        elif c == '"' then
+          { doctype-id-acc := Nil; state := SDoctypeSystemIdDQ }
+        elif c == '\'' then
+          { doctype-id-acc := Nil; state := SDoctypeSystemIdSQ }
+        else
+          { doctype-force := True; state := SBogusDoctype }
+      SBetweenDoctypePublicAndSystemId ->
+        if is-ws(c) then
+          ()
+        elif c == '>' then
+          { emit-doctype(); state := SData }
+        elif c == '"' then
+          { doctype-id-acc := Nil; state := SDoctypeSystemIdDQ }
+        elif c == '\'' then
+          { doctype-id-acc := Nil; state := SDoctypeSystemIdSQ }
+        else
+          { doctype-force := True; state := SBogusDoctype }
+      SAfterDoctypeSystemKeyword ->
+        if is-ws(c) then
+          state := SBeforeDoctypeSystemId
+        elif c == '"' then
+          { doctype-id-acc := Nil; state := SDoctypeSystemIdDQ }
+        elif c == '\'' then
+          { doctype-id-acc := Nil; state := SDoctypeSystemIdSQ }
+        elif c == '>' then
+          { doctype-force := True; emit-doctype(); state := SData }
+        else
+          { doctype-force := True; state := SBogusDoctype }
+      SBeforeDoctypeSystemId ->
+        if is-ws(c) then
+          ()
+        elif c == '"' then
+          { doctype-id-acc := Nil; state := SDoctypeSystemIdDQ }
+        elif c == '\'' then
+          { doctype-id-acc := Nil; state := SDoctypeSystemIdSQ }
+        elif c == '>' then
+          { doctype-force := True; emit-doctype(); state := SData }
+        else
+          { doctype-force := True; state := SBogusDoctype }
+      SDoctypeSystemIdDQ ->
+        if c == '"' then
+          { doctype-system := Just(string/listchar/string(doctype-id-acc.reverse)); doctype-id-acc := Nil; state := SAfterDoctypeSystemId }
+        elif c == '>' then
+          { doctype-force := True; doctype-system := Just(string/listchar/string(doctype-id-acc.reverse)); emit-doctype(); state := SData }
+        else
+          doctype-id-acc := Cons(c, doctype-id-acc)
+      SDoctypeSystemIdSQ ->
+        if c == '\'' then
+          { doctype-system := Just(string/listchar/string(doctype-id-acc.reverse)); doctype-id-acc := Nil; state := SAfterDoctypeSystemId }
+        elif c == '>' then
+          { doctype-force := True; doctype-system := Just(string/listchar/string(doctype-id-acc.reverse)); emit-doctype(); state := SData }
+        else
+          doctype-id-acc := Cons(c, doctype-id-acc)
+      SAfterDoctypeSystemId ->
+        if is-ws(c) then
+          ()
+        elif c == '>' then
+          { emit-doctype(); state := SData }
+        else
+          { doctype-force := True; state := SBogusDoctype }
+      SBogusDoctype ->
+        if c == '>' then
+          { doctype-force := True; emit-doctype(); state := SData }
         else
           ()
       SEndTagOpen ->
@@ -547,6 +689,23 @@ pub fun tokenize(input: string, initial: tokenizer-state = Data, lastStartTag: m
   })
 
   // EOF
+  match state
+    SBeforeDoctypeName -> { doctype-force := True; emit-doctype() }
+    SDoctypeName -> { doctype-force := True; emit-doctype() }
+    SAfterDoctypeName -> { doctype-force := True; emit-doctype() }
+    SAfterDoctypePublicKeyword -> { doctype-force := True; emit-doctype() }
+    SBeforeDoctypePublicId -> { doctype-force := True; emit-doctype() }
+    SDoctypePublicIdDQ -> { doctype-force := True; doctype-public := Just(string/listchar/string(doctype-id-acc.reverse)); emit-doctype() }
+    SDoctypePublicIdSQ -> { doctype-force := True; doctype-public := Just(string/listchar/string(doctype-id-acc.reverse)); emit-doctype() }
+    SAfterDoctypePublicId -> { doctype-force := True; emit-doctype() }
+    SBetweenDoctypePublicAndSystemId -> { doctype-force := True; emit-doctype() }
+    SAfterDoctypeSystemKeyword -> { doctype-force := True; emit-doctype() }
+    SBeforeDoctypeSystemId -> { doctype-force := True; emit-doctype() }
+    SDoctypeSystemIdDQ -> { doctype-force := True; doctype-system := Just(string/listchar/string(doctype-id-acc.reverse)); emit-doctype() }
+    SDoctypeSystemIdSQ -> { doctype-force := True; doctype-system := Just(string/listchar/string(doctype-id-acc.reverse)); emit-doctype() }
+    SAfterDoctypeSystemId -> { doctype-force := True; emit-doctype() }
+    SBogusDoctype -> { doctype-force := True; emit-doctype() }
+    _ -> ()
   flush-text()
   out := Cons(TokEOF, out)
   (out.reverse, Nil)

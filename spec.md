@@ -320,6 +320,6 @@ Guiding principles:
 ## Current Status (2025-12-22)
 
 - M0: implemented (smoke test + minimal modules).
-- Tokenizer: passes the currently allowlisted tokenizer subset (5442/6810 = 79.9%) (includes non-`Data` `initialStates` and `lastStartTag` cases; parse errors still not emitted).
+- Tokenizer: passes the currently allowlisted tokenizer subset (5782/6810 = 84.9%) (includes non-`Data` `initialStates` + `lastStartTag`, plus more DOCTYPE parsing; parse errors still not emitted).
 - Tree construction: minimal insertion-mode slice for wrapper synthesis (auto `<html>/<head>/<body>`); allowlists currently `92/1590` (doc) and `20/192` (frag).
 - Not implemented yet (high-level): full HTML5 treebuilder insertion modes + adoption agency + tables, foreign content/templates, error locations/codes, encoding + byte input.
