@@ -682,8 +682,13 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
       Initial ->
         match t
           TokDoctype(name, publicId, systemId, forceQuirks) ->
-            (append(st(st0.stack, BeforeHtml, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors),
-                    TDoctype(Doctype(name, publicId, systemId, forceQuirks))), False)
+            {
+              // Treat "non-HTML5" doctypes as parse errors (covers html5lib's `unknown-doctype` bucket).
+              val isHtml5 = (!forceQuirks && lower-ascii-string(name) == "html" && publicId == Nothing && systemId == Nothing)
+              val st1 = if isHtml5 then st0 else add-error(st0)
+              (append(st(st1.stack, BeforeHtml, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors),
+                      TDoctype(Doctype(name, publicId, systemId, forceQuirks))), False)
+            }
           TokComment(data) -> (append(st0, TComment(data)), False)
           TokCharacter(s) ->
             if is-ws(s) then (st0, False) else (st(st0.stack, BeforeHtml, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors), True)
