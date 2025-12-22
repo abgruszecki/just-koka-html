@@ -239,11 +239,17 @@ fun arena-from-children(rootNode: node, children: list<tnode>) : <div> dom
   val nodes = vector/list/vector(nodesRev.reverse)
   Dom(nodes, rootId)
 
-fun build-tree(tokens: list<token>, initial: frame) : <div,exn> list<tnode>
+fun build-tree(tokens: list<token>, initial: frame) : <div,exn> (children: list<tnode>, errors: int)
   fun add-child(fr: frame, child: tnode) : frame
     Frame(fr.kind, Cons(child, fr.children))
 
   var stack : list<frame> := Cons(initial, Nil)
+  var errs := 0
+
+  fun is-fragment() : bool
+    match initial.kind
+      FFrag(_) -> True
+      _ -> False
 
   fun push(kind: fkind)
     stack := Cons(Frame(kind, Nil), stack)
@@ -326,11 +332,17 @@ fun build-tree(tokens: list<token>, initial: frame) : <div,exn> list<tnode>
                 push(FEl(adjName, ns, attrs1))
             }
           TokEndTag(name) ->
-            if lower-ascii-string(name) == "template" then pop-template() else pop-ci(name)
+            if lower-ascii-string(name) == "template" then
+              if has-open(stack, "template") then pop-template() else errs := errs + 1
+            else
+              if has-open(stack, name) then pop-ci(name) else errs := errs + 1
           TokCharacter(data) -> if data == "" then () else append(TText(data))
           TokComment(data) -> append(TComment(data))
           TokDoctype(name, publicId, systemId, forceQuirks) ->
-            append(TDoctype(Doctype(name, publicId, systemId, forceQuirks)))
+            if is-fragment() then
+              errs := errs + 1
+            else
+              append(TDoctype(Doctype(name, publicId, systemId, forceQuirks)))
           TokEOF -> ()
         consume(rest)
 
@@ -361,9 +373,11 @@ fun build-tree(tokens: list<token>, initial: frame) : <div,exn> list<tnode>
       _ -> ()
   })
 
-  match stack
-    Cons(root, _) -> root.children.reverse
-    _ -> Nil
+  val children =
+    match stack
+      Cons(root, _) -> root.children.reverse
+      _ -> Nil
+  (children, errs)
 
 pub fun build-document(tokens: list<token>) : <div,exn> (dom, int)
   // M2: a minimal insertion-mode document builder.
@@ -1034,7 +1048,7 @@ pub fun build-document(tokens: list<token>) : <div,exn> (dom, int)
   val dom = arena-from-children(Document(Nil, "no-quirks"), closed)
   (dom, st4.errors)
 
-pub fun build-fragment(tokens: list<token>, fragCtx: fragmentcontext) : <div,exn> dom
+pub fun build-fragment(tokens: list<token>, fragCtx: fragmentcontext) : <div,exn> (dom, int)
   val initial = Frame(FFrag(Just(fragCtx)), Nil)
-  val children = build-tree(tokens, initial)
-  arena-from-children(DocumentFragment(Nil, Just(fragCtx)), children)
+  val (children, errs) = build-tree(tokens, initial)
+  (arena-from-children(DocumentFragment(Nil, Just(fragCtx)), children), errs)

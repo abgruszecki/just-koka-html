@@ -58,8 +58,11 @@ pub fun parse(html: string, opts: parseoptions = default-parse-options) : <div,e
 
 pub fun parse-fragment(html: string, fragCtx: fragmentcontext, opts: parseoptions = default-parse-options) : <div,exn> parseresult
   val (tokens, errors) = tokenizer/tokenize-for-parse(html, Data)
-  val dom = treebuilder/build-fragment(tokens, fragCtx)
-  Parseresult(dom, errors)
+  val (dom, treeErrCount) = treebuilder/build-fragment(tokens, fragCtx)
+  fun add-n-tree-errors(n: int, acc: list<parseerror>) : <div> list<parseerror>
+    if n <= 0 then acc else add-n-tree-errors(n - 1, Cons(Parseerror("tree-error", 1, 1), acc))
+  val withTree = add-n-tree-errors(treeErrCount, errors)
+  Parseresult(dom, withTree.reverse)
 
 pub val tokenize = tokenizer/tokenize
 
