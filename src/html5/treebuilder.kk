@@ -126,6 +126,11 @@ fun map-attr-name(name: string) : <div,exn> attrname
 fun map-attrs(attrs: list<attr>) : <div,exn> list<attr>
   attrs.map(fn(a){ Attr(map-attr-name(a.name.local), a.value) })
 
+fun adjust-attrs(ns: namespace, attrs: list<attr>) : <div,exn> list<attr>
+  // Only map xlink/xml/xmlns prefixes in foreign content. In HTML, keep attributes as-is
+  // so they serialize like `xml:lang` / `xlink:href` on HTML elements (html5lib tree format).
+  if is-html-ns(ns) then attrs else map-attrs(attrs)
+
 fun svg-tag-adjust(name: string) : string
   // https://html.spec.whatwg.org/multipage/parsing.html#svg-tag-name-adjustments
   match name
@@ -333,7 +338,7 @@ fun build-tree(tokens: list<token>, initial: frame) : <div,exn> (children: list<
               val ns = ns0
               val adjName0 = adjust-tag-name(ns, name)
               val adjName = adjName0
-              val attrs1 = map-attrs(attrs)
+              val attrs1 = adjust-attrs(ns, attrs)
               if (is-html-ns(ns) && adjName == "template" && !selfClosing) then
                 { push(FEl("template", Html, attrs1)); push(FTemplateContent) }
               elif selfClosing || (is-html-ns(ns) && is-void-element(adjName)) then
@@ -483,7 +488,7 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
       val ns0 = element-ns(st0.stack, rawName)
       val ns = ns0
       val name = adjust-tag-name(ns, rawName)
-      val attrs1 = map-attrs(attrs)
+      val attrs1 = adjust-attrs(ns, attrs)
       if (is-html-ns(ns) && name == "template" && !selfClosing) then
         {
           val st1 = push-el(st0, "template", Html, attrs1)
@@ -976,7 +981,7 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
             elif name == "html" then
               {
                 val st1 = ensure-html(st0, Nil)
-                val st2 = if st0.html-inserted then merge-html-attrs(add-error(st1), map-attrs(attrs)) else ensure-html(st0, attrs)
+                val st2 = if st0.html-inserted then merge-html-attrs(add-error(st1), attrs) else ensure-html(st0, attrs)
                 (st(st2.stack, BeforeHead, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors), False)
               }
             else
@@ -1004,7 +1009,7 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
           TokStartTag(name, attrs, selfClosing) ->
             if name == "html" then
               {
-                val st1 = merge-html-attrs(add-error(st0), map-attrs(attrs))
+                val st1 = merge-html-attrs(add-error(st0), attrs)
                 (st(st1.stack, InHead, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False)
               }
             elif name == "head" then (st0, False)
@@ -1085,7 +1090,7 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
           TokStartTag(name, attrs, selfClosing) ->
             if name == "html" then
               {
-                val st1 = merge-html-attrs(add-error(st0), map-attrs(attrs))
+                val st1 = merge-html-attrs(add-error(st0), attrs)
                 (st(st1.stack, InHeadNoscript, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False)
               }
             elif name == "head" || name == "noscript" then (add-error(st0), False)
@@ -1140,7 +1145,7 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
           TokStartTag(name, attrs, selfClosing) ->
             if name == "html" then
               {
-                val st1 = merge-html-attrs(add-error(st0), map-attrs(attrs))
+                val st1 = merge-html-attrs(add-error(st0), attrs)
                 (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False)
               }
             elif name == "head" || name == "body" then (st0, False)
