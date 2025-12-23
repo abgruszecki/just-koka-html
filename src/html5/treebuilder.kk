@@ -1356,6 +1356,9 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
                 { val st1 = end-tag(st0, name); (update-mode(st1), False) }
               else
                 (st(st0.stack, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors + 1), False)
+            elif name == "html" || name == "body" then
+              // Don't allow these end tags to close the actual <html>/<body> element from inside table modes.
+              (add-error(st0), False)
             elif name == "colgroup" then
               { val st1 = end-tag(st0, "colgroup"); (st(st1.stack, InTable, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False) }
             elif name == "table" then
@@ -1366,7 +1369,17 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
               else
                 (st(st0.stack, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors + 1), False)
           TokCharacter(s) ->
-            if is-ws(s) then (append(st0, TText(s)), False) else (add-error(st0), False)
+            if is-ws(s) then
+              (append(st0, TText(s)), False)
+            else
+              {
+                // Non-whitespace characters in a colgroup context should be handled as if in-table.
+                // html5lib's `tables01.dat` counts an error per fostered character here.
+                val n = string/vector(s).length
+                val st1 = st(st0.stack, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors + n)
+                val st2 = end-tag(st1, "colgroup")
+                (st(st2.stack, InTable, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors), True)
+              }
           TokComment(data) -> (append(st0, TComment(data)), False)
           TokDoctype(_,_,_,_) -> (add-error(st0), False)
           TokEOF -> (add-eof-error(st0), False)
