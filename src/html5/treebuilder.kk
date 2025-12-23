@@ -613,6 +613,15 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
     })
     string/listchar/string(acc.reverse)
 
+  fun split-leading-ws(s: string) : <div,exn> (ws: string, rest: string)
+    val cs = string/vector(s)
+    var i := 0
+    fun is-ws-char(c: char) : bool
+      c == ' ' || c == '\n' || c == '\t' || c == '\r' || c == '\u000c'
+    while(fn(){ i < cs.length && is-ws-char(cs[i]) }, fn(){ i := i + 1 })
+    // `i` is the first non-ws index (or length).
+    (slice-string(cs, 0, i), slice-string(cs, i, cs.length))
+
   fun add-error(st0: dstate) : dstate
     st(st0.stack, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors + 1)
 
@@ -972,7 +981,33 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
               elif is-ws(s) then
                 (append(st0, TText(s)), False)
               else
-                { val stack1 = pop-to(st0.stack, "head"); (st(stack1, AfterHead, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors), True) }
+                {
+                  // Preserve any leading whitespace in the head, and reprocess the remainder after leaving the head.
+                  val (ws0, rest0) = split-leading-ws(s)
+                  if ws0 != "" then
+                    {
+                      val st1 = append(st0, TText(ws0))
+                      if rest0 == "" then
+                        (st1, False)
+                      else
+                        {
+                          val stack1 = pop-to(st1.stack, "head")
+                          val st2 = st(stack1, AfterHead, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors)
+                          // Handle the remainder as if we were in `AfterHead` without relying on `reprocess`,
+                          // since `reprocess` can only reprocess the *original* token.
+                          if is-ws(rest0) then
+                            (append(st2, TText(rest0)), False)
+                          else
+                            {
+                              val st3 = ensure-body(st2, Nil)
+                              val st4 = st(st3.stack, InBody, st3.html-inserted, st3.head-inserted, st3.body-inserted, st3.errors)
+                              (append(st4, TText(rest0)), False)
+                            }
+                        }
+                    }
+                  else
+                    { val stack1 = pop-to(st0.stack, "head"); (st(stack1, AfterHead, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors), True) }
+                }
             }
           TokComment(data) -> (append(st0, TComment(data)), False)
           TokDoctype(_,_,_,_) -> (st0, False)
