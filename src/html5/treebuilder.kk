@@ -1274,6 +1274,9 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
                 { val st1 = end-tag(st0, name); (update-mode(st1), False) }
               else
                 (st(st0.stack, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors + 1), False)
+            elif name == "html" || name == "body" then
+              // Don't allow these end tags to close the actual <html>/<body> element from inside table modes.
+              (add-error(st0), False)
             elif name == "table" then
               { val st1 = end-tag(st0, "table"); (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False) }
             else
@@ -1319,6 +1322,8 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
                 { val st1 = end-tag(st0, name); (update-mode(st1), False) }
               else
                 (st(st0.stack, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors + 1), False)
+            elif name == "html" || name == "body" then
+              (add-error(st0), False)
             elif is-table-section(name) then
               if has-open(st0.stack, name) then
                 { val st1 = end-tag(st0, name); (st(st1.stack, InTable, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False) }
@@ -1402,6 +1407,8 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
                 { val st1 = end-tag(st0, name); (update-mode(st1), False) }
               else
                 (st(st0.stack, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors + 1), False)
+            elif name == "html" || name == "body" then
+              (add-error(st0), False)
             elif name == "tr" then
               { val st1 = end-tag(st0, "tr"); (st(st1.stack, InTableBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False) }
             elif name == "table" then
@@ -1427,6 +1434,8 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
                 { val st1 = end-tag(st0, name); (update-mode(st1), False) }
               else
                 (st(st0.stack, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors + 1), False)
+            elif name == "html" || name == "body" then
+              (add-error(st0), False)
             elif is-table-cell(name) then
               { val st1 = end-tag(st0, name); (st(st1.stack, InRow, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False) }
             elif name == "table" then
