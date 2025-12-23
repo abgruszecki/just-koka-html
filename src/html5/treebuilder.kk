@@ -251,7 +251,9 @@ fun arena-from-children(rootNode: node, children: list<tnode>) : <div> dom
 
 fun build-tree(tokens: list<token>, initial: frame) : <div,exn> (children: list<tnode>, errors: int)
   fun add-child(fr: frame, child: tnode) : frame
-    Frame(fr.kind, Cons(child, fr.children))
+    match (child, fr.children)
+      (TText(new), Cons(TText(prev), rest)) -> Frame(fr.kind, Cons(TText(prev ++ new), rest))
+      _ -> Frame(fr.kind, Cons(child, fr.children))
 
   var stack : list<frame> := Cons(initial, Nil)
   var errs := 0
@@ -394,7 +396,9 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
   // Goal: reliably synthesize <html><head><body> even when wrappers are missing or partial.
 
   fun add-child(fr: frame, child: tnode) : frame
-    Frame(fr.kind, Cons(child, fr.children))
+    match (child, fr.children)
+      (TText(new), Cons(TText(prev), rest)) -> Frame(fr.kind, Cons(TText(prev ++ new), rest))
+      _ -> Frame(fr.kind, Cons(child, fr.children))
 
   fun st( stack: list<frame>, imode: mode, html: bool, head: bool, body: bool, errors: int ) : dstate
     Dstate(stack, imode, html, head, body, Nil, errors)
