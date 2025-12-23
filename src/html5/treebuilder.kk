@@ -580,6 +580,7 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
       "h4" -> True
       "h5" -> True
       "h6" -> True
+      "xmp" -> True
       _ -> False
 
   fun close-p-if-needed(st0: dstate, name: string) : <div,exn> dstate
@@ -961,7 +962,7 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
             elif name == "noscript" then
               {
                 val st1 = start-tag(st0, name, attrs, selfClosing)
-                if scriptingEnabled then
+                if !scriptingEnabled then
                   (st(st1.stack, InHeadNoscript, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False)
                 else
                   (st1, False)
@@ -976,7 +977,7 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
             {
               val (curName, _curNs) = current-element(st0.stack)
               val nm = lower-ascii-string(curName)
-              if nm == "title" || nm == "style" || nm == "script" || nm == "noframes" then
+              if nm == "title" || nm == "style" || nm == "script" || nm == "noframes" || (scriptingEnabled && nm == "noscript") then
                 (append(st0, TText(s)), False)
               elif is-ws(s) then
                 (append(st0, TText(s)), False)

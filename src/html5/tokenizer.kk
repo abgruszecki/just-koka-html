@@ -345,7 +345,7 @@ fun consume-rawtext-endtag(cs: vector<char>, pos: int, lastStartTag: maybe<strin
 
 // M1: a pragmatic subset tokenizer (tokenizer-tests), plus an optional auto-switch mode
 // used by tree construction to approximate the spec's treebuilder-driven state changes.
-fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: maybe<string>, autoSwitch: bool, xmlFixup: bool)
+fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: maybe<string>, autoSwitch: bool, xmlFixup: bool, scriptingEnabled: bool)
   : <div,exn> (tokens: list<token>, errors: list<parseerror>)
   val cs = preprocess(input, xmlFixup)
   // Precompute 1-based (line,col) for each codepoint in the preprocessed stream.
@@ -468,6 +468,7 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
         "iframe" -> { last-start := Just(name); tag-next-state := SRAWTEXT }
         "noembed" -> { last-start := Just(name); tag-next-state := SRAWTEXT }
         "noframes" -> { last-start := Just(name); tag-next-state := SRAWTEXT }
+        "noscript" -> if scriptingEnabled then { last-start := Just(name); tag-next-state := SRAWTEXT } else ()
         "script" -> { last-start := Just(name); tag-next-state := SScriptData }
         "plaintext" -> { last-start := Just(name); tag-next-state := SPlaintext }
         _ -> ()
@@ -1276,12 +1277,12 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
 
 pub fun tokenize(input: string, initial: tokenizer-state = Data, lastStartTag: maybe<string> = Nothing)
   : <div,exn> (tokens: list<token>, errors: list<parseerror>)
-  tokenize-internal(input, initial, lastStartTag, False, False)
+  tokenize-internal(input, initial, lastStartTag, False, False, True)
 
 pub fun tokenize-xml(input: string, initial: tokenizer-state = Data, lastStartTag: maybe<string> = Nothing)
   : <div,exn> (tokens: list<token>, errors: list<parseerror>)
-  tokenize-internal(input, initial, lastStartTag, False, True)
+  tokenize-internal(input, initial, lastStartTag, False, True, True)
 
-pub fun tokenize-for-parse(input: string, initial: tokenizer-state = Data, lastStartTag: maybe<string> = Nothing)
+pub fun tokenize-for-parse(input: string, initial: tokenizer-state = Data, lastStartTag: maybe<string> = Nothing, scriptingEnabled: bool = True)
   : <div,exn> (tokens: list<token>, errors: list<parseerror>)
-  tokenize-internal(input, initial, lastStartTag, True, False)
+  tokenize-internal(input, initial, lastStartTag, True, False, scriptingEnabled)
