@@ -284,7 +284,23 @@ fun build-tree(tokens: list<token>, initial: frame) : <div,exn> (children: list<
           match top.kind
             FEl(name,_,_) ->
               {
-                stack := Cons(add-child(parent, close-frame(top)), rest)
+                val node = close-frame(top)
+                val topLow = lower-ascii-string(name)
+                val fosterOk =
+                  match parent.kind
+                    FEl(parentName, _pns, _pattrs) ->
+                      {
+                        val p = lower-ascii-string(parentName)
+                        p == "table"
+                          && !(topLow == "caption" || topLow == "colgroup" || topLow == "tbody" || topLow == "thead" || topLow == "tfoot")
+                      }
+                    _ -> False
+                if fosterOk then
+                  match rest
+                    Cons(tblParent, rest2) -> stack := Cons(parent, Cons(add-child(tblParent, node), rest2))
+                    _ -> stack := Cons(add-child(parent, node), rest)
+                else
+                  stack := Cons(add-child(parent, node), rest)
                 if lower-ascii-string(name) == want then () else pop-loop()
               }
             _ -> ()
@@ -475,7 +491,24 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
         match top.kind
           FEl(elname,_,_) ->
             {
-              val stack1 = Cons(add-child(parent, close-frame(top)), rest)
+              val node = close-frame(top)
+              val topLow = lower-ascii-string(elname)
+              val stack1 =
+                match parent.kind
+                  FEl(parentName, _pns, _pattrs) ->
+                    {
+                      val p = lower-ascii-string(parentName)
+                      val isTableChild =
+                        topLow == "caption" || topLow == "colgroup" || topLow == "tbody" || topLow == "thead" || topLow == "tfoot"
+                          || topLow == "style" || topLow == "script"
+                      if p == "table" && !isTableChild then
+                        match rest
+                          Cons(tblParent, rest2) -> Cons(parent, Cons(add-child(tblParent, node), rest2))
+                          _ -> Cons(add-child(parent, node), rest)
+                      else
+                        Cons(add-child(parent, node), rest)
+                    }
+                  _ -> Cons(add-child(parent, node), rest)
               if lower-ascii-string(elname) == lower-ascii-string(name) then stack1 else pop-to(stack1, name)
             }
           _ -> stack0
@@ -496,12 +529,17 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
         st(st2.stack, st2.imode, st2.html-inserted, True, st2.body-inserted, st2.errors)
       }
 
-  fun ensure-body(st0: dstate, attrs: list<attr>) : dstate
+  fun ensure-body(st0: dstate, attrs: list<attr>) : <div,exn> dstate
     val st1 = ensure-html(st0, Nil)
-    if st1.body-inserted then st1 else
+    val st2 =
+      if has-open(st1.stack, "head") then
+        st(pop-to(st1.stack, "head"), st1.imode, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors)
+      else
+        st1
+    if st2.body-inserted then st2 else
       {
-        val st2 = push-el(st1, "body", Html, attrs)
-        st(st2.stack, st2.imode, st2.html-inserted, st2.head-inserted, True, st2.errors)
+        val st3 = push-el(st2, "body", Html, attrs)
+        st(st3.stack, st3.imode, st3.html-inserted, st3.head-inserted, True, st3.errors)
       }
 
   fun insert-void(st0: dstate, name: string, ns: namespace, attrs: list<attr>) : dstate
@@ -580,19 +618,52 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
       _ -> False
 
   fun has-eof-disallowed(stack0: list<frame>) : <div> bool
-    match stack0
-      Nil -> False
-      Cons(fr, rest) ->
-        match fr.kind
-          FEl(name,_,_) ->
-            if is-eof-allowed(name) then has-eof-disallowed(rest) else True
-          _ -> has-eof-disallowed(rest)
+    {
+      fun after-template-content(xs: list<frame>) : maybe<list<frame>>
+        match xs
+          Nil -> Nothing
+          Cons(fr, rest) ->
+            match fr.kind
+              FTemplateContent -> Just(rest)
+              _ -> after-template-content(rest)
+
+      // EOF-in-template is counted separately; ignore open elements inside template content.
+      val xs =
+        match after-template-content(stack0)
+          Just(outside) ->
+            match outside
+              Nil -> outside
+              Cons(fr, rest) ->
+                match fr.kind
+                  FEl(nm, _ns, _attrs) ->
+                    if nm == "template" then rest else outside
+                  _ -> outside
+          Nothing -> stack0
+      match xs
+        Nil -> False
+        Cons(fr, rest) ->
+          match fr.kind
+            FEl(name,_,_) ->
+              if is-eof-allowed(name) then has-eof-disallowed(rest) else True
+            _ -> has-eof-disallowed(rest)
+    }
 
   fun add-eof-error(st0: dstate) : <div> dstate
-    if has-eof-disallowed(st0.stack) then
-      st(st0.stack, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors + 1)
-    else
-      st0
+    {
+      fun has-template-content(stack0: list<frame>) : bool
+        match stack0
+          Nil -> False
+          Cons(fr, rest) ->
+            match fr.kind
+              FTemplateContent -> True
+              _ -> has-template-content(rest)
+
+      val add1 = if has-eof-disallowed(st0.stack) then 1 else 0
+      val add2 = if has-template-content(st0.stack) then 1 else 0
+      val n = add1 + add2
+      if n <= 0 then st0
+      else st(st0.stack, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors + n)
+    }
 
   fun closes-p-on-start(name: string) : bool
     match name
@@ -960,10 +1031,19 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
             if lower-ascii-string(elname) == "select" then
               {
                 val node = close-frame(top)
-                val stack1 = Cons(parent, rest)
-                match foster-stack(stack1, node)
-                  Just(stack2) -> stack2
-                  Nothing -> Cons(add-child(parent, node), rest)
+                // Only foster-parent when the <select> is directly under a <table>.
+                match parent.kind
+                  FEl(parentName, _pns, _pattrs) ->
+                    if lower-ascii-string(parentName) == "table" then
+                      {
+                        val stack1 = Cons(parent, rest)
+                        match foster-stack(stack1, node)
+                          Just(stack2) -> stack2
+                          Nothing -> Cons(add-child(parent, node), rest)
+                      }
+                    else
+                      Cons(add-child(parent, node), rest)
+                  _ -> Cons(add-child(parent, node), rest)
               }
             else
               pop-to-select-foster(Cons(add-child(parent, close-frame(top)), rest))
@@ -1060,7 +1140,12 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
       InHead ->
         match t
           TokEndTag(name) ->
-            if name == "head" then
+            if in-template-content(st0.stack) then
+              if has-open(st0.stack, name) then
+                (end-tag(st0, name), False)
+              else
+                (add-error(st0), False)
+            elif name == "head" then
               { val stack1 = pop-to(st0.stack, "head"); (st(stack1, AfterHead, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors), False) }
             elif name == "body" || name == "html" then
               { val stack1 = pop-to(st0.stack, "head"); (st(stack1, AfterHead, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors), True) }
@@ -1072,7 +1157,9 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
             else
               (add-error(st0), False)
           TokStartTag(name, attrs, selfClosing) ->
-            if name == "html" then
+            if in-template-content(st0.stack) then
+              (start-tag(st0, name, attrs, selfClosing), False)
+            elif name == "html" then
               {
                 val st1 = merge-html-attrs(add-error(st0), attrs)
                 (st(st1.stack, InHead, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False)
@@ -1099,7 +1186,9 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
             else
               { val stack1 = pop-to(st0.stack, "head"); (st(stack1, AfterHead, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors), True) }
           TokCharacter(s) ->
-            {
+            if in-template-content(st0.stack) then
+              (append(st0, TText(s)), False)
+            else {
               val (curName, _curNs) = current-element(st0.stack)
               val nm = lower-ascii-string(curName)
               if nm == "title" || nm == "style" || nm == "script" || nm == "noframes" || (scriptingEnabled && nm == "noscript") then
@@ -1189,13 +1278,25 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
         match t
           TokComment(data) -> (append(st0, TComment(data)), False)
           TokCharacter(s) ->
-            if is-ws(s) then
-              (append(st0, TText(s)), False)
-            else
-              { val st1 = ensure-body(st0, Nil); (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True) }
-          TokStartTag(name, attrs, _) ->
+            {
+              val (curName, _curNs) = current-element(st0.stack)
+              val nm = lower-ascii-string(curName)
+              if nm == "title" then
+                (append(st0, TText(s)), False)
+              elif is-ws(s) then
+                (append(st0, TText(s)), False)
+              else
+                { val st1 = ensure-body(st0, Nil); (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True) }
+            }
+          TokStartTag(name, attrs, selfClosing) ->
             if name == "head" then
               (add-error(st0), False)
+            elif name == "title" then
+              {
+                // Parse error, but still insert <title> into the (still-open) head and parse its contents.
+                val st1 = start-tag(add-error(st0), name, attrs, selfClosing)
+                (st(st1.stack, AfterHead, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False)
+              }
             elif name == "style" || name == "script" then
               {
                 val node = TEl(name, Html, adjust-attrs(Html, attrs), Nil)
@@ -1213,7 +1314,17 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
             else
               { val st1 = ensure-body(st0, Nil); (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True) }
           TokEndTag(name) ->
-            if name == "style" || name == "script" then
+            if name == "title" && has-open(st0.stack, "title") then
+              match st0.stack
+                Cons(top, rest) ->
+                  {
+                    val node = close-frame(top)
+                    val st1 = st(rest, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors)
+                    val st2 = append-into-head(st1, node)
+                    (st(st2.stack, AfterHead, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors), False)
+                  }
+                _ -> (end-tag(st0, "title"), False)
+            elif name == "style" || name == "script" then
               // We don't keep these head elements open on the stack in AfterHead;
               // swallow their end tags to avoid counting them as stray.
               (st0, False)
@@ -1251,6 +1362,15 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
             elif name == "html" then (st0, False)
             elif name == "br" then
               (start-tag(add-error(st0), "br", Nil, True), False)
+            elif name == "template" && in-template-content(st0.stack) then
+              // html5lib's template fixture counts a mismatch error when </template> appears while there are still
+              // unclosed elements in the template content.
+              match st0.stack
+                Cons(fr, _) ->
+                  match fr.kind
+                    FTemplateContent -> (end-tag(st0, "template"), False)
+                    _ -> (end-tag(add-error(st0), "template"), False)
+                _ -> (end-tag(add-error(st0), "template"), False)
             else
               if has-open(st0.stack, name) then
                 if is-formatting-element(name) then
@@ -1317,6 +1437,14 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
           TokStartTag(name, attrs, selfClosing) ->
             if in-template-content(st0.stack) then
               (start-tag(st0, name, attrs, selfClosing), False)
+            elif has-open(st0.stack, "select")
+                 && (name == "tr" || is-table-section(name) || is-table-cell(name) || name == "caption" || name == "col" || name == "colgroup") then
+              {
+                // In select-in-table contexts, close the <select> (foster-parented) before processing other table-structure tokens.
+                val stack1 = pop-to-select-foster(st0.stack)
+                val st1 = st(stack1, InTable, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors)
+                (st1, True)
+              }
             elif name == "table" then
               {
                 // Nested <table> start tags in a table context close the current table and reprocess.
@@ -1334,16 +1462,19 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
                 val st1 = start-tag(st0, "colgroup", Nil, False)
                 (st(st1.stack, InColumnGroup, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True)
               }
+            elif name == "caption" then
+              (start-tag(st0, name, attrs, selfClosing), False)
+            elif name == "template" then
+              (start-tag(st0, name, attrs, selfClosing), False)
             elif name == "select" then
               (start-tag(add-error(st0), name, attrs, selfClosing), False)
             elif is-table-section(name) then
               { val st1 = start-tag(st0, name, attrs, selfClosing); (st(st1.stack, InTableBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False) }
             elif name == "tr" then
               {
-                val st1 = add-error(st0)
-                val st2 = ensure-tbody(st1)
-                val st3 = start-tag(st(st2.stack, InTableBody, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors), name, attrs, selfClosing)
-                (st(st3.stack, InRow, st3.html-inserted, st3.head-inserted, st3.body-inserted, st3.errors), False)
+                val st1 = ensure-tbody(st0)
+                val st2 = start-tag(st(st1.stack, InTableBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), name, attrs, selfClosing)
+                (st(st2.stack, InRow, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors), False)
               }
             elif is-table-cell(name) then
               {
@@ -1355,8 +1486,13 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
               }
             elif name == "option" then
               (start-tag(add-error(st0), name, attrs, selfClosing), False)
-            else
+            elif name == "style" || name == "script" then
               (start-tag(st0, name, attrs, selfClosing), False)
+            else
+              {
+                val st1 = if foster-needed(st0.stack) then add-error(st0) else st0
+                (start-tag(st1, name, attrs, selfClosing), False)
+              }
           TokEndTag(name) ->
             if in-template-content(st0.stack) then
               if has-open(st0.stack, name) then
@@ -1399,7 +1535,12 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
             elif is-ws(s) || !foster-needed(st0.stack) then
               (append(st0, TText(s)), False)
             else
-              (foster-append(st0, TText(s)), False)
+              {
+                // html5lib: foster-parented characters in table contexts are parse errors (often counted per character).
+                val n = string/vector(s).length
+                val st1 = st(st0.stack, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors + n)
+                (foster-append(st1, TText(s)), False)
+              }
           TokComment(data) -> (append(st0, TComment(data)), False)
           TokDoctype(_,_,_,_) -> (add-error(st0), False)
           TokEOF -> (add-eof-error(st0), False)
@@ -1408,6 +1549,17 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
           TokStartTag(name, attrs, selfClosing) ->
             if in-template-content(st0.stack) then
               (start-tag(st0, name, attrs, selfClosing), False)
+            elif name == "caption" then
+              {
+                // Pop the table body element so `<caption>` becomes a direct child of `<table>`.
+                val st1 = close-row(st0)
+                val st2 =
+                  if has-open(st1.stack, "tbody") then end-tag(st1, "tbody")
+                  elif has-open(st1.stack, "thead") then end-tag(st1, "thead")
+                  elif has-open(st1.stack, "tfoot") then end-tag(st1, "tfoot")
+                  else st1
+                (st(st2.stack, InTable, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors), True)
+              }
             elif name == "tr" then
               { val st1 = start-tag(st0, name, attrs, selfClosing); (st(st1.stack, InRow, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False) }
             elif is-table-cell(name) then
@@ -1490,11 +1642,8 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
             else
               {
                 // Non-whitespace characters in a colgroup context should be handled as if in-table.
-                // html5lib's `tables01.dat` counts an error per fostered character here.
-                val n = string/vector(s).length
-                val st1 = st(st0.stack, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors + n)
-                val st2 = end-tag(st1, "colgroup")
-                (st(st2.stack, InTable, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors), True)
+                val st1 = end-tag(st0, "colgroup")
+                (st(st1.stack, InTable, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True)
               }
           TokComment(data) -> (append(st0, TComment(data)), False)
           TokDoctype(_,_,_,_) -> (add-error(st0), False)
@@ -1506,10 +1655,24 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
               (start-tag(st0, name, attrs, selfClosing), False)
             elif is-table-cell(name) then
               { val st1 = start-tag(st0, name, attrs, selfClosing); (st(st1.stack, InCell, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False) }
+            elif name == "caption" then
+              {
+                // Close the current row and let table-body mode place `<caption>` correctly.
+                val st1 = end-tag(st0, "tr")
+                (st(st1.stack, InTableBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True)
+              }
             elif name == "tr" then
-              { val st1 = add-error(st0); (st(st1.stack, InTableBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True) }
+              {
+                // Close the current row before starting a new one.
+                val st1 = end-tag(st0, "tr")
+                (st(st1.stack, InTableBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True)
+              }
             elif is-table-section(name) || name == "table" then
-              { val st1 = add-error(st0); (st(st1.stack, InTableBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True) }
+              {
+                val st1 = add-error(st0)
+                val st2 = end-tag(st1, "tr")
+                (st(st2.stack, InTableBody, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors), True)
+              }
             else
               (start-tag(st0, name, attrs, selfClosing), False)
           TokEndTag(name) ->
@@ -1548,7 +1711,10 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
             elif name == "html" || name == "body" then
               (add-error(st0), False)
             elif is-table-cell(name) then
-              { val st1 = end-tag(st0, name); (st(st1.stack, InRow, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False) }
+              if has-open(st0.stack, name) then
+                { val st1 = end-tag(st0, name); (st(st1.stack, InRow, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False) }
+              else
+                (add-error(st0), False)
             elif name == "table" then
               { val st1 = close-cell(st0); (st(st1.stack, InRow, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True) }
             else
@@ -1560,7 +1726,15 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
             if in-template-content(st0.stack) then
               (start-tag(st0, name, attrs, selfClosing), False)
             elif is-one-of(name, Cons("td", Cons("th", Cons("tr", Cons("tbody", Cons("thead", Cons("tfoot", Cons("table", Nil)))))))) then
-              { val st1 = close-cell(st0); (st(st1.stack, InRow, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True) }
+              {
+                // Close the current cell and reprocess.
+                // html5lib counts an error here for nested cell start tags, but not for all table-structure tags.
+                val (curName, _curNs) = current-element(st0.stack)
+                val curLow = lower-ascii-string(curName)
+                val st1 = if (name == "td" || name == "th") && curLow != "td" && curLow != "th" then add-error(st0) else st0
+                val st2 = close-cell(st1)
+                (st(st2.stack, InRow, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors), True)
+              }
             else
               (start-tag(st0, name, attrs, selfClosing), False)
           TokCharacter(s) ->
@@ -1613,10 +1787,51 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
           _ ->
             match stack0
               Cons(top, Cons(parent2, rest2)) ->
-                close-all(Cons(add-child(parent2, close-frame(top)), rest2))
+                match (top.kind, parent2.kind)
+                  (FEl(topName, _topNs, _topAttrs), FEl(parentName, _pns, _pattrs)) ->
+                    {
+                      val p = lower-ascii-string(parentName)
+                      val t = lower-ascii-string(topName)
+                      fun is-table-child(name: string) : bool
+                        name == "caption" || name == "colgroup" || name == "tbody" || name == "thead" || name == "tfoot"
+                          || name == "style" || name == "script"
+
+                      if p == "table" && !is-table-child(t) then
+                        {
+                          val node = close-frame(top)
+                          val stack1 = Cons(parent2, rest2)
+                          match foster-stack(stack1, node)
+                            Just(stack2) -> close-all(stack2)
+                            Nothing -> close-all(Cons(add-child(parent2, node), rest2))
+                        }
+                      else
+                        close-all(Cons(add-child(parent2, close-frame(top)), rest2))
+                    }
+                  _ -> close-all(Cons(add-child(parent2, close-frame(top)), rest2))
               _ -> stack0
       Cons(top, Cons(parent, rest)) ->
-        close-all(Cons(add-child(parent, close-frame(top)), rest))
+        match (top.kind, parent.kind)
+          (FEl(topName, _topNs, _topAttrs), FEl(parentName, _pns, _pattrs)) ->
+            {
+              val p = lower-ascii-string(parentName)
+              val t = lower-ascii-string(topName)
+              fun is-table-child(name: string) : bool
+                name == "caption" || name == "colgroup" || name == "tbody" || name == "thead" || name == "tfoot"
+                  || name == "style" || name == "script"
+
+              if p == "table" && !is-table-child(t) then
+                {
+                  // Foster-parent non-table children out of `<table>` at close time, so they end up before the table.
+                  val node = close-frame(top)
+                  val stack1 = Cons(parent, rest)
+                  match foster-stack(stack1, node)
+                    Just(stack2) -> close-all(stack2)
+                    Nothing -> close-all(Cons(add-child(parent, node), rest))
+                }
+              else
+                close-all(Cons(add-child(parent, close-frame(top)), rest))
+            }
+          _ -> close-all(Cons(add-child(parent, close-frame(top)), rest))
       _ -> stack0
 
   val closed =
