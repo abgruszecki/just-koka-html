@@ -360,6 +360,12 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
     match es
       Nil -> ()
       Cons(code, rest) -> { add-err(code, at); add-ref-errs(at, rest) }
+  fun add-eof-in-comment(at: int)
+    {
+      // html5lib counts both a legacy and a modern error here.
+      add-err("eof-in-comment", at)
+      add-err("eof-in-comment", at)
+    }
 
   // Token under construction
   var cur-is-end := False
@@ -836,12 +842,7 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
         if c == '>' then
           { emit-token(TokComment(string/listchar/string(comment-acc.reverse))); state := SData }
         elif c == '!' then
-          {
-            // html5lib counts both a legacy and a modern error here.
-            add-err("unexpected-bang-after-double-dash-in-comment", i)
-            add-err("incorrectly-closed-comment", i)
-            state := SCommentEndBang
-          }
+          state := SCommentEndBang
         elif c == '-' then
           comment-acc := Cons('-', comment-acc)
         else
@@ -854,7 +855,13 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
           }
       SCommentEndBang ->
         if c == '>' then
-          { emit-token(TokComment(string/listchar/string(comment-acc.reverse))); state := SData }
+          {
+            // html5lib counts both a legacy and a modern error here.
+            add-err("unexpected-bang-after-double-dash-in-comment", i)
+            add-err("incorrectly-closed-comment", i)
+            emit-token(TokComment(string/listchar/string(comment-acc.reverse)))
+            state := SData
+          }
         elif c == '-' then
           { comment-acc := Cons('-', comment-acc); comment-acc := Cons('-', comment-acc); comment-acc := Cons('!', comment-acc); state := SCommentEndDash }
         else
@@ -1164,6 +1171,7 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
   })
 
   // EOF
+  val eof-at = if cs.length > 0 then (cs.length - 1) else 0
   match state
     STagOpen -> text-acc := Cons('<', text-acc)
     SMarkupDeclOpen -> emit-token(TokComment(""))
@@ -1173,22 +1181,22 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
     SRCDATAEndTagName -> emit-temp-as-text()
     SRAWTEXTEndTagName -> emit-temp-as-text()
     SScriptDataEndTagName -> emit-temp-as-text()
-    SCommentStart -> emit-token(TokComment(""))
-    SCommentStartDash -> emit-token(TokComment(""))
-    SComment -> emit-token(TokComment(string/listchar/string(comment-acc.reverse)))
+    SCommentStart -> { add-eof-in-comment(eof-at); emit-token(TokComment("")) }
+    SCommentStartDash -> { add-eof-in-comment(eof-at); emit-token(TokComment("")) }
+    SComment -> { add-eof-in-comment(eof-at); emit-token(TokComment(string/listchar/string(comment-acc.reverse))) }
     SCommentLessThanSign ->
-      { comment-acc := Cons('<', comment-acc); emit-token(TokComment(string/listchar/string(comment-acc.reverse))) }
+      { add-eof-in-comment(eof-at); comment-acc := Cons('<', comment-acc); emit-token(TokComment(string/listchar/string(comment-acc.reverse))) }
     SCommentLessThanSignBang ->
-      { comment-acc := Cons('<', comment-acc); comment-acc := Cons('!', comment-acc); emit-token(TokComment(string/listchar/string(comment-acc.reverse))) }
+      { add-eof-in-comment(eof-at); comment-acc := Cons('<', comment-acc); comment-acc := Cons('!', comment-acc); emit-token(TokComment(string/listchar/string(comment-acc.reverse))) }
     SCommentLessThanSignBangDash ->
-      { comment-acc := Cons('-', comment-acc); emit-token(TokComment(string/listchar/string(comment-acc.reverse))) }
-    SCommentLessThanSignBangDashDash -> emit-token(TokComment(string/listchar/string(comment-acc.reverse)))
-    SCommentEndDash -> emit-token(TokComment(string/listchar/string(comment-acc.reverse)))
-    SCommentEnd -> emit-token(TokComment(string/listchar/string(comment-acc.reverse)))
-    SCommentEndBang -> emit-token(TokComment(string/listchar/string(comment-acc.reverse)))
+      { add-eof-in-comment(eof-at); comment-acc := Cons('-', comment-acc); emit-token(TokComment(string/listchar/string(comment-acc.reverse))) }
+    SCommentLessThanSignBangDashDash -> { add-eof-in-comment(eof-at); emit-token(TokComment(string/listchar/string(comment-acc.reverse))) }
+    SCommentEndDash -> { add-eof-in-comment(eof-at); emit-token(TokComment(string/listchar/string(comment-acc.reverse))) }
+    SCommentEnd -> { add-eof-in-comment(eof-at); emit-token(TokComment(string/listchar/string(comment-acc.reverse))) }
+    SCommentEndBang -> { add-eof-in-comment(eof-at); emit-token(TokComment(string/listchar/string(comment-acc.reverse))) }
     SEndTagOpen ->
       { text-acc := Cons('<', text-acc); text-acc := Cons('/', text-acc) }
-    SBogusComment -> emit-token(TokComment(string/listchar/string(comment-acc.reverse)))
+    SBogusComment -> { add-eof-in-comment(eof-at); emit-token(TokComment(string/listchar/string(comment-acc.reverse))) }
     SBeforeDoctypeName -> { doctype-force := True; emit-doctype() }
     SDoctypeName -> { doctype-force := True; emit-doctype() }
     SAfterDoctypeName -> { doctype-force := True; emit-doctype() }
