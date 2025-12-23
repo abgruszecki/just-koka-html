@@ -530,6 +530,7 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
       "th" -> True
       "thead" -> True
       "tr" -> True
+      "head" -> True
       "body" -> True
       "html" -> True
       _ -> False
@@ -1073,7 +1074,11 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
           TokComment(data) -> (append(st0, TComment(data)), False)
           TokDoctype(_,_,_,_) -> (st0, False)
           TokEOF ->
-            { val stack1 = pop-to(st0.stack, "head"); (st(stack1, AfterHead, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors), True) }
+            {
+              val st1 = add-eof-error(st0)
+              val stack1 = pop-to(st1.stack, "head")
+              (st(stack1, AfterHead, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True)
+            }
       InHeadNoscript ->
         match t
           TokEndTag(name) ->
