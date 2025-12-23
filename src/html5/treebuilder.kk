@@ -704,8 +704,55 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
       "xmp" -> True
       _ -> False
 
+  fun is-scope-boundary(name0: string, ns: namespace) : <div,exn> bool
+    if !is-html-ns(ns) then True
+    else
+      val name = lower-ascii-string(name0)
+      match name
+        "applet" -> True
+        "caption" -> True
+        "html" -> True
+        "table" -> True
+        "td" -> True
+        "th" -> True
+        "marquee" -> True
+        "object" -> True
+        "template" -> True
+        _ -> False
+
+  fun has-in-scope(stack0: list<frame>, target0: string) : <div,exn> bool
+    val target = lower-ascii-string(target0)
+    fun go(xs: list<frame>) : <div,exn> bool
+      match xs
+        Nil -> False
+        Cons(fr, rest) ->
+          match fr.kind
+            FEl(nm, ns, _) ->
+              val name = lower-ascii-string(nm)
+              if is-html-ns(ns) && name == target then True
+              elif is-scope-boundary(name, ns) then False
+              else go(rest)
+            _ -> go(rest)
+    go(stack0)
+
+  fun has-in-button-scope(stack0: list<frame>, target0: string) : <div,exn> bool
+    val target = lower-ascii-string(target0)
+    fun go(xs: list<frame>) : <div,exn> bool
+      match xs
+        Nil -> False
+        Cons(fr, rest) ->
+          match fr.kind
+            FEl(nm, ns, _) ->
+              val name = lower-ascii-string(nm)
+              if is-html-ns(ns) && name == target then True
+              elif is-html-ns(ns) && name == "button" then False
+              elif is-scope-boundary(name, ns) then False
+              else go(rest)
+            _ -> go(rest)
+    go(stack0)
+
   fun close-p-if-needed(st0: dstate, name: string) : <div,exn> dstate
-    if closes-p-on-start(name) && has-open(st0.stack, "p") then
+    if closes-p-on-start(name) && has-in-button-scope(st0.stack, "p") then
       st(pop-to(st0.stack, "p"), st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors)
     else
       st0
@@ -1345,6 +1392,16 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
             elif name == "frame" then
               // Disallow <frame> in the body; ignore it.
               (st0, False)
+            elif name == "button" then
+              {
+                // If a <button> is already in scope, close it before inserting a new one.
+                val st1 =
+                  if has-in-scope(st0.stack, "button") then
+                    st(pop-to(add-error(st0).stack, "button"), st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors + 1)
+                  else
+                    st0
+                (start-tag(st1, name, attrs, selfClosing), False)
+              }
             else
               {
                 val ns = element-ns(st0.stack, name)
