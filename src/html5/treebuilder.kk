@@ -126,10 +126,19 @@ fun map-attr-name(name: string) : <div,exn> attrname
 fun map-attrs(attrs: list<attr>) : <div,exn> list<attr>
   attrs.map(fn(a){ Attr(map-attr-name(a.name.local), a.value) })
 
+fun math-attr-adjust(name: string) : string
+  // https://html.spec.whatwg.org/multipage/parsing.html#mathml-attribute-name-adjustments
+  match name
+    "definitionurl" -> "definitionURL"
+    _ -> name
+
 fun adjust-attrs(ns: namespace, attrs: list<attr>) : <div,exn> list<attr>
   // Only map xlink/xml/xmlns prefixes in foreign content. In HTML, keep attributes as-is
   // so they serialize like `xml:lang` / `xlink:href` on HTML elements (html5lib tree format).
-  if is-html-ns(ns) then attrs else map-attrs(attrs)
+  match ns
+    Html -> attrs
+    Math -> map-attrs(attrs.map(fn(a){ Attr(Attrname(None, math-attr-adjust(a.name.local)), a.value) }))
+    _ -> map-attrs(attrs)
 
 fun svg-tag-adjust(name: string) : string
   // https://html.spec.whatwg.org/multipage/parsing.html#svg-tag-name-adjustments
