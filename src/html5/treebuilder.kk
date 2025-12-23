@@ -1013,7 +1013,7 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
                 val st1 = merge-html-attrs(add-error(st0), attrs)
                 (st(st1.stack, InHead, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False)
               }
-            elif name == "head" then (st0, False)
+            elif name == "head" then (add-error(st0), False)
             elif name == "body" then
               {
                 val stack1 = pop-to(st0.stack, "head")
@@ -1130,7 +1130,9 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
             else
               { val st1 = ensure-body(st0, Nil); (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True) }
           TokStartTag(name, attrs, _) ->
-            if name == "frameset" then
+            if name == "head" then
+              (add-error(st0), False)
+            elif name == "frameset" then
               {
                 // Allow a frameset document before inserting a <body>.
                 val st1 = start-tag(st0, name, attrs, False)
