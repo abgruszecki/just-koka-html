@@ -950,6 +950,26 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
       Just(stack1) -> st(stack1, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors)
       Nothing -> append(st0, child)
 
+  fun pop-to-select-foster(stack0: list<frame>) : <div,exn> list<frame>
+    // Close elements until <select>, but when closing the <select> itself, foster-parent it (so it ends up
+    // before the current table) instead of appending it into the current parent.
+    match stack0
+      Cons(top, Cons(parent, rest)) ->
+        match top.kind
+          FEl(elname, _ns, _attrs) ->
+            if lower-ascii-string(elname) == "select" then
+              {
+                val node = close-frame(top)
+                val stack1 = Cons(parent, rest)
+                match foster-stack(stack1, node)
+                  Just(stack2) -> stack2
+                  Nothing -> Cons(add-child(parent, node), rest)
+              }
+            else
+              pop-to-select-foster(Cons(add-child(parent, close-frame(top)), rest))
+          _ -> stack0
+      _ -> stack0
+
   fun in-template-content(stack0: list<frame>) : bool
     match stack0
       Nil -> False
@@ -1297,7 +1317,15 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
           TokStartTag(name, attrs, selfClosing) ->
             if in-template-content(st0.stack) then
               (start-tag(st0, name, attrs, selfClosing), False)
-            elif name == "table" then (add-error(st0), False)
+            elif name == "table" then
+              {
+                // Nested <table> start tags in a table context close the current table and reprocess.
+                val st1 = add-error(st0)
+                // If a <select> is open, close it (foster-parented) first so it ends up before the table.
+                val stack1 = if has-open(st1.stack, "select") then pop-to-select-foster(st1.stack) else st1.stack
+                val st2 = end-tag(st(stack1, st1.imode, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), "table")
+                (st(st2.stack, InBody, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors), True)
+              }
             elif name == "colgroup" then
               { val st1 = start-tag(st0, name, attrs, selfClosing); (st(st1.stack, InColumnGroup, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False) }
             elif name == "col" then
@@ -1306,6 +1334,8 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
                 val st1 = start-tag(st0, "colgroup", Nil, False)
                 (st(st1.stack, InColumnGroup, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True)
               }
+            elif name == "select" then
+              (start-tag(add-error(st0), name, attrs, selfClosing), False)
             elif is-table-section(name) then
               { val st1 = start-tag(st0, name, attrs, selfClosing); (st(st1.stack, InTableBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False) }
             elif name == "tr" then
@@ -1323,6 +1353,8 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
                 val st4 = start-tag(st(st3.stack, InRow, st3.html-inserted, st3.head-inserted, st3.body-inserted, st3.errors), name, attrs, selfClosing)
                 (st(st4.stack, InCell, st4.html-inserted, st4.head-inserted, st4.body-inserted, st4.errors), False)
               }
+            elif name == "option" then
+              (start-tag(add-error(st0), name, attrs, selfClosing), False)
             else
               (start-tag(st0, name, attrs, selfClosing), False)
           TokEndTag(name) ->
@@ -1334,15 +1366,37 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
             elif name == "html" || name == "body" then
               // Don't allow these end tags to close the actual <html>/<body> element from inside table modes.
               (add-error(st0), False)
+            elif name == "select" && has-open(st0.stack, "select") then
+              {
+                // In table contexts, </select> is a parse error but still closes the <select> (foster-parented).
+                val st1 = add-error(st0)
+                val stack1 = pop-to-select-foster(st1.stack)
+                val st2 = st(stack1, st1.imode, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors)
+                (update-mode(st2), False)
+              }
             elif name == "table" then
-              { val st1 = end-tag(st0, "table"); (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False) }
+              if has-open(st0.stack, "select") then
+                {
+                  // In select-in-table-like cases, close <select> first (foster-parented), then reprocess </table>.
+                  // html5lib doesn't count an extra error for this </table> (see `tables01.dat` #8).
+                  val stack1 = pop-to-select-foster(st0.stack)
+                  val st2 = st(stack1, InTable, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors)
+                  (st2, True)
+                }
+              else
+                { val st1 = end-tag(st0, "table"); (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False) }
             else
               if has-open(st0.stack, name) then
                 { val st1 = end-tag(st0, name); (update-mode(st1), False) }
               else
                 (st(st0.stack, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors + 1), False)
           TokCharacter(s) ->
-            if is-ws(s) || in-template-content(st0.stack) || !foster-needed(st0.stack) then
+            if in-template-content(st0.stack) then
+              (append(st0, TText(s)), False)
+            elif has-open(st0.stack, "select") && has-open(st0.stack, "table") then
+              // html5lib: character tokens in a table+select context are parse errors, but still inserted.
+              (append(add-error(st0), TText(s)), False)
+            elif is-ws(s) || !foster-needed(st0.stack) then
               (append(st0, TText(s)), False)
             else
               (foster-append(st0, TText(s)), False)
