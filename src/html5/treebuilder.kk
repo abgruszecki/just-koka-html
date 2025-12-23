@@ -414,6 +414,50 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
       Cons(fr, rest) ->
         st(Cons(add-child(fr, child), rest), st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors)
 
+  fun append-into-head(st0: dstate, child: tnode) : <div,exn> dstate
+    // After the <head> element has been popped, html5lib still expects certain "head" elements
+    // like <style>/<script> to be inserted into the existing <head> node, not into <body>.
+    fun add-to-head-node(n: tnode) : <div,exn> maybe<tnode>
+      match n
+        TEl(name, ns, attrs, kids) ->
+          if is-html-ns(ns) && lower-ascii-string(name) == "head" then
+            Just(TEl(name, ns, attrs, kids ++ Cons(child, Nil)))
+          else Nothing
+        _ -> Nothing
+
+    fun add-to-html-frame(fr: frame) : <div,exn> maybe<frame>
+      match fr.kind
+        FEl(nm, ns, _attrs) ->
+          if is-html-ns(ns) && lower-ascii-string(nm) == "html" then
+            {
+              fun go(xs: list<tnode>, acc: list<tnode>) : <div,exn> (found: bool, out: list<tnode>)
+                match xs
+                  Nil -> (False, acc)
+                  Cons(n, rest) ->
+                    match add-to-head-node(n)
+                      Just(n2) -> (True, acc ++ Cons(n2, rest))
+                      Nothing -> go(rest, acc ++ Cons(n, Nil))
+              val (found, kids2) = go(fr.children, Nil)
+              if found then Just(Frame(fr.kind, kids2)) else Nothing
+            }
+          else Nothing
+        _ -> Nothing
+
+    fun go(stack0: list<frame>) : <div,exn> maybe<list<frame>>
+      match stack0
+        Nil -> Nothing
+        Cons(fr, rest) ->
+          match add-to-html-frame(fr)
+            Just(fr2) -> Just(Cons(fr2, rest))
+            Nothing ->
+              match go(rest)
+                Just(tail) -> Just(Cons(fr, tail))
+                Nothing -> Nothing
+
+    match go(st0.stack)
+      Just(stack1) -> st(stack1, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors)
+      Nothing -> append(st0, child)
+
   fun push-el(st0: dstate, name: string, ns: namespace, attrs: list<attr>) : dstate
     st(Cons(Frame(FEl(name, ns, attrs), Nil), st0.stack), st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors)
 
@@ -1132,6 +1176,12 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
           TokStartTag(name, attrs, _) ->
             if name == "head" then
               (add-error(st0), False)
+            elif name == "style" || name == "script" then
+              {
+                val node = TEl(name, Html, adjust-attrs(Html, attrs), Nil)
+                val st1 = append-into-head(add-error(st0), node)
+                (st(st1.stack, AfterHead, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False)
+              }
             elif name == "frameset" then
               {
                 // Allow a frameset document before inserting a <body>.
@@ -1142,8 +1192,13 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
               { val st1 = ensure-body(st0, attrs); (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False) }
             else
               { val st1 = ensure-body(st0, Nil); (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True) }
-          TokEndTag(_) ->
-            { val st1 = ensure-body(st0, Nil); (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True) }
+          TokEndTag(name) ->
+            if name == "style" || name == "script" then
+              // We don't keep these head elements open on the stack in AfterHead;
+              // swallow their end tags to avoid counting them as stray.
+              (st0, False)
+            else
+              { val st1 = ensure-body(st0, Nil); (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True) }
           TokDoctype(_,_,_,_) -> (st0, False)
           TokEOF ->
             { val st1 = ensure-body(st0, Nil); (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True) }
