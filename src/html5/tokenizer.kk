@@ -836,7 +836,12 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
         if c == '>' then
           { emit-token(TokComment(string/listchar/string(comment-acc.reverse))); state := SData }
         elif c == '!' then
-          state := SCommentEndBang
+          {
+            // html5lib counts both a legacy and a modern error here.
+            add-err("unexpected-bang-after-double-dash-in-comment", i)
+            add-err("incorrectly-closed-comment", i)
+            state := SCommentEndBang
+          }
         elif c == '-' then
           comment-acc := Cons('-', comment-acc)
         else
