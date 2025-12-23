@@ -271,16 +271,21 @@ fun consume-char-ref(cs: vector<char>, pos: int, in-attr: bool)
             Just(v) ->
               {
                 val endsSemi = (k > next && k <= len && cs[k - 1] == ';')
+                val semErrs =
+                  if !endsSemi then
+                    Cons("named-entity-without-semicolon", Cons("missing-semicolon-after-character-reference", Nil))
+                  else
+                    Nil
                 if (in-attr && !endsSemi) then
                   {
                     val following = if k < len then cs[k] else '\u0000'
                     if (k < len && (is-ascii-alnum(following) || following == '=')) then
                       (1, Nothing, Nil)
                     else
-                      (k - pos, Just(v), Nil)
+                      (k - pos, Just(v), semErrs)
                   }
                 else
-                  (k - pos, Just(v), Nil)
+                  (k - pos, Just(v), semErrs)
               }
         }
 
