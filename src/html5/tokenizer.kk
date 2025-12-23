@@ -219,16 +219,17 @@ fun find-entity-match(cs: vector<char>, start: int, end: int) : <div,exn> (end: 
         Nothing -> find-entity-match(cs, start, end - 1)
     }
 
-fun consume-char-ref(cs: vector<char>, pos: int, in-attr: bool) : <div,exn> (consumed: int, replacement: maybe<string>)
+fun consume-char-ref(cs: vector<char>, pos: int, in-attr: bool)
+  : <div,exn> (consumed: int, replacement: maybe<string>, errors: list<string>)
   // `pos` is the index of '&'.
   val len = cs.length
   val next = pos + 1
-  if next >= len then (1, Nothing) else
+  if next >= len then (1, Nothing, Nil) else
     val c1 = cs[next]
     if c1 == '#' then
       // Numeric character reference.
       val n2 = next + 1
-      if n2 >= len then (1, Nothing) else
+      if n2 >= len then (1, Nothing, Nil) else
         val c2 = cs[n2]
         val isHex = (c2 == 'x' || c2 == 'X')
         val digitsStart = if isHex then (n2 + 1) else n2
@@ -239,25 +240,34 @@ fun consume-char-ref(cs: vector<char>, pos: int, in-attr: bool) : <div,exn> (con
             (isHex && ((cs[j] >= 'a' && cs[j] <= 'f') || (cs[j] >= 'A' && cs[j] <= 'F')))
           )
         }, fn(){ j := j + 1 })
-        if j == digitsStart then (1, Nothing) else
-          val hasSemi = (j < len && cs[j] == ';')
-          val end = j
-          val code = parse-uint(cs, digitsStart, end, if isHex then 16 else 10)
-          val safe = sanitize-codepoint(code)
-          val s = char/string(safe.char)
-          val consumed = (if hasSemi then (j - pos + 1) else (j - pos))
-          (consumed, Just(s))
+        if j == digitsStart then (1, Nothing, Nil) else
+          {
+            val hasSemi = (j < len && cs[j] == ';')
+            val end = j
+            val code = parse-uint(cs, digitsStart, end, if isHex then 16 else 10)
+            val safe = sanitize-codepoint(code)
+            val s = char/string(safe.char)
+            val consumed = (if hasSemi then (j - pos + 1) else (j - pos))
+            // html5lib tree-construction fixtures count both legacy + modern numeric-entity errors.
+            val isControl = (code < 0x20) || (code >= 0x7F && code <= 0x9F)
+            val errs =
+              if isControl then
+                Cons("illegal-codepoint-for-numeric-entity", Cons("control-character-reference", Nil))
+              else
+                Nil
+            (consumed, Just(s), errs)
+          }
     else
       // Named character reference: ASCII alnum only.
       var j := next
       while(fn(){ j < len && is-ascii-alnum(cs[j]) }, fn(){ j := j + 1 })
-      if j == next then (1, Nothing) else
+      if j == next then (1, Nothing, Nil) else
         {
           val hasSemi = (j < len && cs[j] == ';')
           val maxEnd = if hasSemi then (j + 1) else j
           val (k, rep) = find-entity-match(cs, next, maxEnd)
           match rep
-            Nothing -> (1, Nothing)
+            Nothing -> (1, Nothing, Nil)
             Just(v) ->
               {
                 val endsSemi = (k > next && k <= len && cs[k - 1] == ';')
@@ -265,12 +275,12 @@ fun consume-char-ref(cs: vector<char>, pos: int, in-attr: bool) : <div,exn> (con
                   {
                     val following = if k < len then cs[k] else '\u0000'
                     if (k < len && (is-ascii-alnum(following) || following == '=')) then
-                      (1, Nothing)
+                      (1, Nothing, Nil)
                     else
-                      (k - pos, Just(v))
+                      (k - pos, Just(v), Nil)
                   }
                 else
-                  (k - pos, Just(v))
+                  (k - pos, Just(v), Nil)
               }
         }
 
@@ -341,6 +351,10 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
     val line = if (at >= 0 && at < pos-line.length) then pos-line[at] else 1
     val col = if (at >= 0 && at < pos-col.length) then pos-col[at] else 1
     errs := Cons(errors/Parseerror(code, line, col), errs)
+  fun add-ref-errs(at: int, es: list<string>)
+    match es
+      Nil -> ()
+      Cons(code, rest) -> { add-err(code, at); add-ref-errs(at, rest) }
 
   // Token under construction
   var cur-is-end := False
@@ -483,7 +497,8 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
         if c == '<' then
           state := STagOpen
         elif c == '&' then
-          val (consumed, repl) = consume-char-ref(cs, i, False)
+          val (consumed, repl, refErrs) = consume-char-ref(cs, i, False)
+          add-ref-errs(i + consumed - 1, refErrs)
           match repl
             Nothing -> text-acc := Cons('&', text-acc)
             Just(s) -> text-acc := s.list.reverse ++ text-acc
@@ -494,7 +509,8 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
           text-acc := Cons(repl-nul(c), text-acc)
       SRCDATA ->
         if c == '&' then
-          val (consumed, repl) = consume-char-ref(cs, i, False)
+          val (consumed, repl, refErrs) = consume-char-ref(cs, i, False)
+          add-ref-errs(i + consumed - 1, refErrs)
           match repl
             Nothing -> text-acc := Cons('&', text-acc)
             Just(s) -> text-acc := s.list.reverse ++ text-acc
@@ -1072,7 +1088,8 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
           finish-attr()
           state := SAfterAttrValueQ
         elif c == '&' then
-          val (consumed, repl) = consume-char-ref(cs, i, True)
+          val (consumed, repl, refErrs) = consume-char-ref(cs, i, True)
+          add-ref-errs(i + consumed - 1, refErrs)
           match repl
             Nothing -> cur-attr-value := Cons('&', cur-attr-value)
             Just(s) -> cur-attr-value := s.list.reverse ++ cur-attr-value
@@ -1084,7 +1101,8 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
           finish-attr()
           state := SAfterAttrValueQ
         elif c == '&' then
-          val (consumed, repl) = consume-char-ref(cs, i, True)
+          val (consumed, repl, refErrs) = consume-char-ref(cs, i, True)
+          add-ref-errs(i + consumed - 1, refErrs)
           match repl
             Nothing -> cur-attr-value := Cons('&', cur-attr-value)
             Just(s) -> cur-attr-value := s.list.reverse ++ cur-attr-value
@@ -1098,7 +1116,8 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
         elif c == '>' then
           { finish-tag(); state := tag-next-state }
         elif c == '&' then
-          val (consumed, repl) = consume-char-ref(cs, i, True)
+          val (consumed, repl, refErrs) = consume-char-ref(cs, i, True)
+          add-ref-errs(i + consumed - 1, refErrs)
           match repl
             Nothing -> cur-attr-value := Cons('&', cur-attr-value)
             Just(s) -> cur-attr-value := s.list.reverse ++ cur-attr-value
