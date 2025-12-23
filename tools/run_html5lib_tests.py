@@ -155,7 +155,7 @@ def normalize_tokenizer_case(case: dict[str, Any]) -> tuple[str, Any, str | None
     return _koka_utf8_roundtrip(input_text0), roundtrip_obj(expected0), (_koka_utf8_roundtrip(last0) if last0 else None)
 
 
-def run_tokenizer_cases_batch(exe: Path, cases: list[dict[str, Any]]) -> list[list[Any]]:
+def run_tokenizer_cases_batch(exe: Path, cases: list[dict[str, Any]], *, cmd: str = "tokenizer-batch") -> list[list[Any]]:
     lines: list[str] = [str(len(cases))]
     for case in cases:
         state = case["state"]
@@ -166,7 +166,7 @@ def run_tokenizer_cases_batch(exe: Path, cases: list[dict[str, Any]]) -> list[li
         lines.extend(payload[i : i + chunk_size] for i in range(0, len(payload), chunk_size))
 
     proc = subprocess.run(
-        [str(exe), "tokenizer-batch"],
+        [str(exe), cmd],
         cwd=str(ROOT),
         check=True,
         input="\n".join(lines) + "\n",
@@ -289,6 +289,7 @@ def main() -> int:
             continue
         payload = json.loads((tok_dir / fx).read_text(encoding="utf-8"))
         tests = payload.get("tests") or payload.get("xmlViolationTests") or []
+        tok_cmd = "tokenizer-batch-xml" if "xmlViolationTests" in payload else "tokenizer-batch"
         expanded: list[dict[str, Any]] = []
         expect: list[tuple[int, str, list[Any]]] = []
         for idx in enabled:
@@ -301,7 +302,7 @@ def main() -> int:
                 expanded.append({"state": st, "last": last, "input": input_text})
                 expect.append((idx, st, expected_output))
         try:
-            got_batch = run_tokenizer_cases_batch(exe, expanded)
+            got_batch = run_tokenizer_cases_batch(exe, expanded, cmd=tok_cmd)
         except Exception as e:  # noqa: BLE001
             failures.append(f"tokenizer {fx}: runner failed: {e}")
             continue

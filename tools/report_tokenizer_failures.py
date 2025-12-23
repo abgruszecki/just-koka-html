@@ -17,6 +17,9 @@ def iter_cases(payload: dict[str, Any]) -> list[dict[str, Any]]:
     tests = payload.get("tests") or payload.get("xmlViolationTests") or []
     return list(tests)
 
+def tokenizer_cmd(payload: dict[str, Any]) -> str:
+    return "tokenizer-batch-xml" if "xmlViolationTests" in payload else "tokenizer-batch"
+
 
 def main() -> int:
     ap = argparse.ArgumentParser()
@@ -50,6 +53,7 @@ def main() -> int:
         payload = json.loads((tok_dir / fx).read_text(encoding="utf-8"))
         tests = iter_cases(payload)
         assert len(tests) == count_tokenizer_cases(p)
+        tok_cmd = tokenizer_cmd(payload)
 
         expanded: list[dict[str, Any]] = []
         mapping: list[tuple[int, str, list[Any]]] = []
@@ -69,7 +73,7 @@ def main() -> int:
         if not expanded:
             continue
 
-        got_batch = run_tokenizer_cases_batch(exe, expanded)
+        got_batch = run_tokenizer_cases_batch(exe, expanded, cmd=tok_cmd)
         ok = [True] * len(tests)
         for (idx, st, expected), got in zip(mapping, got_batch, strict=True):
             if got != expected:

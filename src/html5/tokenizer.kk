@@ -131,7 +131,7 @@ fun starts-with-ci(cs: vector<char>, start: int, pat: string) : <div,exn> bool
       ok
     }
 
-fun preprocess(input: string) : <div,exn> vector<char>
+fun preprocess(input: string, xmlFixup: bool) : <div,exn> vector<char>
   val cs = string/vector(input)
   var out : list<char> := Nil
   var i := 0
@@ -140,11 +140,28 @@ fun preprocess(input: string) : <div,exn> vector<char>
     if c0 == '\r' then
       out := Cons('\n', out)
       if (i + 1 < cs.length && cs[i+1] == '\n') then i := i + 2 else i := i + 1
+    elif xmlFixup && c0 == '\u000c' then
+      { out := Cons(' ', out); i := i + 1 }
+    elif xmlFixup && (c0 == '\uFFFE' || c0 == '\uFFFF') then
+      { out := Cons('\uFFFD', out); i := i + 1 }
     else
       out := Cons(c0, out)
       i := i + 1
   })
   vector/list/vector(out.reverse)
+
+fun sanitize-xml-comment(s: string) : <div,exn> string
+  // Replace disallowed "--" sequences as required by html5lib's xmlViolation tests.
+  val cs = string/vector(s)
+  var acc : list<char> := Nil
+  var i := 0
+  while(fn(){ i < cs.length }, fn(){
+    if (cs[i] == '-' && i + 1 < cs.length && cs[i + 1] == '-') then
+      { acc := Cons('-', acc); acc := Cons(' ', acc); acc := Cons('-', acc); i := i + 2 }
+    else
+      { acc := Cons(cs[i], acc); i := i + 1 }
+  })
+  string/listchar/string(acc.reverse)
 
 fun slice-string(cs: vector<char>, start: int, end: int) : <div,exn> string
   // end is exclusive
@@ -328,9 +345,9 @@ fun consume-rawtext-endtag(cs: vector<char>, pos: int, lastStartTag: maybe<strin
 
 // M1: a pragmatic subset tokenizer (tokenizer-tests), plus an optional auto-switch mode
 // used by tree construction to approximate the spec's treebuilder-driven state changes.
-fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: maybe<string>, autoSwitch: bool)
+fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: maybe<string>, autoSwitch: bool, xmlFixup: bool)
   : <div,exn> (tokens: list<token>, errors: list<parseerror>)
-  val cs = preprocess(input)
+  val cs = preprocess(input, xmlFixup)
   // Precompute 1-based (line,col) for each codepoint in the preprocessed stream.
   fun positions(cs0: vector<char>) : <div,exn> (vector<int>, vector<int>)
     var ls : list<int> := Nil
@@ -414,7 +431,13 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
 
   fun emit-token(t: token)
     flush-text()
-    out := Cons(t, out)
+    match t
+      TokComment(data) ->
+        if xmlFixup then
+          out := Cons(TokComment(sanitize-xml-comment(data)), out)
+        else
+          out := Cons(t, out)
+      _ -> out := Cons(t, out)
 
   fun finish-attr()
     if in-attr then
@@ -1253,8 +1276,12 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
 
 pub fun tokenize(input: string, initial: tokenizer-state = Data, lastStartTag: maybe<string> = Nothing)
   : <div,exn> (tokens: list<token>, errors: list<parseerror>)
-  tokenize-internal(input, initial, lastStartTag, False)
+  tokenize-internal(input, initial, lastStartTag, False, False)
+
+pub fun tokenize-xml(input: string, initial: tokenizer-state = Data, lastStartTag: maybe<string> = Nothing)
+  : <div,exn> (tokens: list<token>, errors: list<parseerror>)
+  tokenize-internal(input, initial, lastStartTag, False, True)
 
 pub fun tokenize-for-parse(input: string, initial: tokenizer-state = Data, lastStartTag: maybe<string> = Nothing)
   : <div,exn> (tokens: list<token>, errors: list<parseerror>)
-  tokenize-internal(input, initial, lastStartTag, True)
+  tokenize-internal(input, initial, lastStartTag, True, False)

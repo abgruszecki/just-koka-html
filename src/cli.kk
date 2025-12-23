@@ -74,7 +74,7 @@ fun run-tokenizer(args: list<string>) : <console,fsys,div,exn> ()
   val out = json/arr(toks.map(token-json))
   out.println
 
-fun run-tokenizer-batch() : <console,div,exn> ()
+fun run-tokenizer-batch(xmlFixup: bool) : <console,div,exn> ()
   // stdin protocol:
   // - First line: integer N
   // - Per case:
@@ -101,7 +101,11 @@ fun run-tokenizer-batch() : <console,div,exn> ()
             if b64.count != b64len then exn/throw("base64 length mismatch")
             val input = base64/decode-utf8(b64)
             val last = if lastArg == "-" then Nothing else Just(lastArg)
-            val (tokens, _errors) = tokenizer/tokenize(input, state-from-arg(stateArg), last)
+            val (tokens, _errors) =
+              if xmlFixup then
+                tokenizer/tokenize-xml(input, state-from-arg(stateArg), last)
+              else
+                tokenizer/tokenize(input, state-from-arg(stateArg), last)
             val toks = tokens.filter(fn(t) match t { TokEOF -> False; _ -> True })
             val out = json/arr(toks.map(token-json))
             go(i + 1, Cons(out, outs))
@@ -196,7 +200,8 @@ pub fun main()
     Cons(cmd, rest) ->
       match cmd
         "tokenizer" -> run-tokenizer(Cons(cmd, rest))
-        "tokenizer-batch" -> run-tokenizer-batch()
+        "tokenizer-batch" -> run-tokenizer-batch(False)
+        "tokenizer-batch-xml" -> run-tokenizer-batch(True)
         "tree-batch" -> run-tree-batch()
         _ -> "usage: cli tokenizer <state> <lastStartTagOr-> <inputPath> | cli tokenizer-batch | cli tree-batch".println
     _ -> "usage: cli tokenizer <state> <lastStartTagOr-> <inputPath> | cli tokenizer-batch | cli tree-batch".println

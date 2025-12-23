@@ -37,6 +37,7 @@ def main() -> int:
         fx = p.name
         payload = json.loads((tok_dir / fx).read_text(encoding="utf-8"))
         tests = payload.get("tests") or payload.get("xmlViolationTests") or []
+        tok_cmd = "tokenizer-batch-xml" if "xmlViolationTests" in payload else "tokenizer-batch"
         assert len(tests) == count_tokenizer_cases(p)
 
         expanded: list[dict[str, Any]] = []
@@ -56,7 +57,7 @@ def main() -> int:
         # A case "passes" only if it matches expected output for every initialState entry.
         ok = [True] * len(tests)
         if expanded:
-            got_batch = run_tokenizer_cases_batch(exe, expanded)
+            got_batch = run_tokenizer_cases_batch(exe, expanded, cmd=tok_cmd)
             for (idx, expected), got in zip(mapping, got_batch, strict=True):
                 if got != expected:
                     ok[idx] = False
