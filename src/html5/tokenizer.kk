@@ -1034,8 +1034,10 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
         elif c == '>' then
           { emit-doctype(); state := SData }
         else
-          // html5lib does not force quirks just for entering the bogus-doctype state here.
-          state := SBogusDoctype
+          if c == '\u0000' then
+            { state := SBogusDoctype; reconsume(SBogusDoctype) }
+          else
+            state := SBogusDoctype
       SBogusDoctype ->
         if c == '>' then
           { doctype-force := True; emit-doctype(); state := SData }
