@@ -697,6 +697,7 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
       "nav" -> True
       "ol" -> True
       "p" -> True
+      "plaintext" -> True
       "section" -> True
       "summary" -> True
       "ul" -> True
