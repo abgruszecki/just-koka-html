@@ -631,6 +631,45 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
       Nil -> False
       Cons(x, rest) -> if lower-ascii-string(name) == lower-ascii-string(x) then True else is-one-of(name, rest)
 
+  fun eq-attrnamespace(a: attrnamespace, b: attrnamespace) : bool
+    match (a,b)
+      (None, None) -> True
+      (XLink, XLink) -> True
+      (Xml, Xml) -> True
+      (Xmlns, Xmlns) -> True
+      _ -> False
+
+  fun eq-attrname(a: attrname, b: attrname) : bool
+    match (a,b)
+      (Attrname(ns1, local1), Attrname(ns2, local2)) -> (eq-attrnamespace(ns1, ns2) && local1 == local2)
+
+  fun has-attr(an: attrname, attrs: list<attr>) : bool
+    match attrs
+      Nil -> False
+      Cons(Attr(name,_), rest) -> eq-attrname(name, an) || has-attr(an, rest)
+
+  fun merge-attrs(keepFirst: list<attr>, add: list<attr>) : list<attr>
+    // Keep existing attributes; only add new ones if not already present.
+    match add
+      Nil -> keepFirst
+      Cons(a, rest) ->
+        if has-attr(a.name, keepFirst) then merge-attrs(keepFirst, rest)
+        else merge-attrs(Cons(a, keepFirst), rest)
+
+  fun merge-html-attrs(st0: dstate, attrs: list<attr>) : <div,exn> dstate
+    fun go(stack0: list<frame>) : <div,exn> list<frame>
+      match stack0
+        Nil -> Nil
+        Cons(fr, rest) ->
+          match fr.kind
+            FEl(nm, ns, old) ->
+              if is-html-ns(ns) && lower-ascii-string(nm) == "html" then
+                Cons(Frame(FEl(nm, ns, merge-attrs(old, attrs)), fr.children), rest)
+              else
+                Cons(fr, go(rest))
+            _ -> Cons(fr, go(rest))
+    st(go(st0.stack), st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors)
+
   fun is-formatting-element(name0: string) : <div,exn> bool
     val name = lower-ascii-string(name0)
     match name
@@ -935,7 +974,11 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
             if name == "head" then
               { val st1 = ensure-head(st0, attrs); (st(st1.stack, InHead, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False) }
             elif name == "html" then
-              { val st1 = ensure-html(st0, attrs); (st(st1.stack, BeforeHead, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False) }
+              {
+                val st1 = ensure-html(st0, Nil)
+                val st2 = if st0.html-inserted then merge-html-attrs(add-error(st1), map-attrs(attrs)) else ensure-html(st0, attrs)
+                (st(st2.stack, BeforeHead, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors), False)
+              }
             else
               { val st1 = ensure-head(st0, Nil); (st(st1.stack, InHead, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True) }
           TokEndTag(_) ->
@@ -949,9 +992,21 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
           TokEndTag(name) ->
             if name == "head" then
               { val stack1 = pop-to(st0.stack, "head"); (st(stack1, AfterHead, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors), False) }
-            else (end-tag(st0, name), False)
+            elif name == "body" || name == "html" then
+              { val stack1 = pop-to(st0.stack, "head"); (st(stack1, AfterHead, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors), True) }
+            elif name == "br" then
+              // Used by html5lib's </br> in <head><noscript>... case; don't double-count errors here.
+              { val stack1 = pop-to(st0.stack, "head"); (st(stack1, AfterHead, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors), True) }
+            else if has-open(st0.stack, name) then
+              (end-tag(st0, name), False)
+            else
+              (add-error(st0), False)
           TokStartTag(name, attrs, selfClosing) ->
-            if name == "html" then (st0, False)
+            if name == "html" then
+              {
+                val st1 = merge-html-attrs(add-error(st0), map-attrs(attrs))
+                (st(st1.stack, InHead, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False)
+              }
             elif name == "head" then (st0, False)
             elif name == "body" then
               {
@@ -1019,24 +1074,43 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
           TokEndTag(name) ->
             if name == "noscript" then
               { val st1 = end-tag(st0, "noscript"); (st(st1.stack, InHead, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False) }
+            elif name == "br" then
+              // Not allowed in this context; treat as if it were in the body (via reprocess).
+              { val stack1 = pop-to(st0.stack, "noscript"); (st(stack1, InHead, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors + 1), True) }
+            elif has-open(st0.stack, name) then
+              (end-tag(st0, name), False)
             else
+              // Ignore unexpected end tags (like </p>) without leaving in-head-noscript.
               (add-error(st0), False)
           TokStartTag(name, attrs, selfClosing) ->
-            if name == "html" then (st0, False)
+            if name == "html" then
+              {
+                val st1 = merge-html-attrs(add-error(st0), map-attrs(attrs))
+                (st(st1.stack, InHeadNoscript, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False)
+              }
             elif name == "head" || name == "noscript" then (add-error(st0), False)
             elif name == "base" || name == "basefont" || name == "bgsound" || name == "link" || name == "meta" || name == "noframes" || name == "style" then
-              (start-tag(st(st0.stack, InHead, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors), name, attrs, selfClosing), False)
+              // "Process using the rules for InHead" without changing the insertion mode.
+              (start-tag(st0, name, attrs, selfClosing), False)
             else
-              { val stack1 = pop-to(st0.stack, "noscript"); (st(stack1, InHead, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors), True) }
+              { val stack1 = pop-to(st0.stack, "noscript"); (st(stack1, InHead, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors + 1), True) }
           TokCharacter(s) ->
             if is-ws(s) then
               (append(st0, TText(s)), False)
             else
-              { val stack1 = pop-to(st0.stack, "noscript"); (st(stack1, InHead, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors), True) }
+              {
+                val (curName, _curNs) = current-element(st0.stack)
+                val nm = lower-ascii-string(curName)
+                if nm == "style" || nm == "noframes" then
+                  (append(st0, TText(s)), False)
+                else
+                  { val stack1 = pop-to(st0.stack, "noscript"); (st(stack1, InHead, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors + 1), True) }
+              }
           TokComment(data) -> (append(st0, TComment(data)), False)
           TokDoctype(_,_,_,_) -> (add-error(st0), False)
           TokEOF ->
-            { val stack1 = pop-to(st0.stack, "noscript"); (st(stack1, InHead, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors), True) }
+            // html5lib: eof-in-head-noscript
+            (add-error(st0), False)
       AfterHead ->
         match t
           TokComment(data) -> (append(st0, TComment(data)), False)
@@ -1064,7 +1138,12 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
       InBody ->
         match t
           TokStartTag(name, attrs, selfClosing) ->
-            if name == "html" || name == "head" || name == "body" then (st0, False)
+            if name == "html" then
+              {
+                val st1 = merge-html-attrs(add-error(st0), map-attrs(attrs))
+                (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False)
+              }
+            elif name == "head" || name == "body" then (st0, False)
             elif name == "frame" then
               // Disallow <frame> in the body; ignore it.
               (st0, False)
@@ -1083,6 +1162,8 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
             if name == "body" then
               { val st1 = end-tag(st0, "body"); (st(st1.stack, AfterBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False) }
             elif name == "html" then (st0, False)
+            elif name == "br" then
+              (start-tag(add-error(st0), "br", Nil, True), False)
             else
               if has-open(st0.stack, name) then
                 if is-formatting-element(name) then
@@ -1359,9 +1440,13 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
   val st1 = process(tokens, st0)
   val st2 = if st1.html-inserted then st1 else ensure-html(st1, Nil)
   val st3 =
-    if st2.head-inserted then st2
-    else
-      { val stx = ensure-head(st2, Nil); st(pop-to(stx.stack, "head"), stx.imode, stx.html-inserted, stx.head-inserted, stx.body-inserted, stx.errors) }
+    {
+      val stx = if st2.head-inserted then st2 else ensure-head(st2, Nil)
+      if has-open(stx.stack, "head") then
+        st(pop-to(stx.stack, "head"), stx.imode, stx.html-inserted, stx.head-inserted, stx.body-inserted, stx.errors)
+      else
+        stx
+    }
   val st4 =
     if st3.body-inserted then st3
     else
