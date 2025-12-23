@@ -1234,6 +1234,10 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
     SRCDATALessThanSign -> text-acc := Cons('<', text-acc)
     SRAWTEXTLessThanSign -> text-acc := Cons('<', text-acc)
     SScriptDataLessThanSign -> text-acc := Cons('<', text-acc)
+    SRCDATAEndTagOpen -> { text-acc := Cons('<', text-acc); text-acc := Cons('/', text-acc) }
+    SRAWTEXTEndTagOpen -> { text-acc := Cons('<', text-acc); text-acc := Cons('/', text-acc) }
+    SScriptDataEndTagOpen -> { text-acc := Cons('<', text-acc); text-acc := Cons('/', text-acc) }
+    SScriptDataEscapedEndTagOpen -> { text-acc := Cons('<', text-acc); text-acc := Cons('/', text-acc) }
     SRCDATAEndTagName -> emit-temp-as-text()
     SRAWTEXTEndTagName -> emit-temp-as-text()
     SScriptDataEndTagName -> emit-temp-as-text()
