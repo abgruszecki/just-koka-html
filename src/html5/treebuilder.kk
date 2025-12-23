@@ -751,6 +751,24 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
             _ -> go(rest)
     go(stack0)
 
+  fun has-in-cell-scope(stack0: list<frame>, target0: string) : <div,exn> bool
+    // Scan from the current node downwards; stop when leaving the current cell.
+    val target = lower-ascii-string(target0)
+    fun go(xs: list<frame>) : <div,exn> bool
+      match xs
+        Nil -> False
+        Cons(fr, rest) ->
+          match fr.kind
+            FEl(nm, ns, _) ->
+              if !is-html-ns(ns) then False
+              else
+                val name = lower-ascii-string(nm)
+                if name == target then True
+                elif name == "td" || name == "th" then False
+                else go(rest)
+            _ -> go(rest)
+    go(stack0)
+
   fun close-p-if-needed(st0: dstate, name: string) : <div,exn> dstate
     if closes-p-on-start(name) && has-in-button-scope(st0.stack, "p") then
       st(pop-to(st0.stack, "p"), st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors)
@@ -1125,6 +1143,11 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
     with-mode(st0, mode-from-stack(st0.stack))
 
   fun process-one(t: token, st0: dstate) : <div,exn> (next: dstate, reprocess: bool)
+    fun process-inbody(t2: token, stx: dstate) : <div,exn> (next: dstate, reprocess: bool)
+      {
+        val (st1, rep) = process-one(t2, with-mode(stx, InBody))
+        (update-mode(st1), rep)
+      }
     match st0.imode
       Initial ->
         match t
@@ -1391,7 +1414,7 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
             elif name == "head" || name == "body" then (st0, False)
             elif name == "frame" then
               // Disallow <frame> in the body; ignore it.
-              (st0, False)
+              (add-error(st0), False)
             elif name == "button" then
               {
                 // If a <button> is already in scope, close it before inserting a new one.
@@ -1580,7 +1603,14 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
                 { val st1 = end-tag(st0, "table"); (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False) }
             else
               if has-open(st0.stack, name) then
-                { val st1 = end-tag(st0, name); (update-mode(st1), False) }
+                if is-formatting-element(name) then
+                  if has-in-scope(st0.stack, name) then
+                    { val st1 = adoption-end-tag(st0, name); (update-mode(st1), False) }
+                  else
+                    // html5lib counts 2 errors here ("unexpected-end-tag-implies-table-voodoo" + "unexpected-end-tag").
+                    (st(st0.stack, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors + 2), False)
+                else
+                  { val st1 = end-tag(st0, name); (update-mode(st1), False) }
               else
                 (st(st0.stack, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors + 1), False)
           TokCharacter(s) ->
@@ -1773,10 +1803,24 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
               else
                 (add-error(st0), False)
             elif name == "table" then
-              { val st1 = close-cell(st0); (st(st1.stack, InRow, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True) }
+              {
+                // Close the cell and reprocess. Count a parse error if the current node isn't the cell itself.
+                val (curName, _curNs) = current-element(st0.stack)
+                val curLow = lower-ascii-string(curName)
+                val stx = if curLow == "td" || curLow == "th" then st0 else add-error(st0)
+                val st1 = close-cell(stx)
+                (st(st1.stack, InRow, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True)
+              }
             else
               if has-open(st0.stack, name) then
-                { val st1 = end-tag(st0, name); (update-mode(st1), False) }
+                if is-formatting-element(name) then
+                  if has-in-cell-scope(st0.stack, name) then
+                    { val st1 = adoption-end-tag(st0, name); (update-mode(st1), False) }
+                  else
+                    // Parse error; ignore end tags for formatting elements that are outside the current cell.
+                    (add-error(st0), False)
+                else
+                  { val st1 = end-tag(st0, name); (update-mode(st1), False) }
               else
                 (st(st0.stack, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors + 1), False)
           TokStartTag(name, attrs, selfClosing) ->
