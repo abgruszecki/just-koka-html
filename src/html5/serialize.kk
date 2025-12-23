@@ -1,5 +1,6 @@
 module html5/serialize
 
+import std/core/string
 import html5/dom
 
 fun indent-prefix(depth: int) : string
@@ -88,7 +89,20 @@ fun render-node(d: dom, id: nodeid, depth: int) : <div,exn> list<string>
         Cons(line, attr-lines ++ Cons(content-line, content-lines) ++ child-lines)
       }
     Text(data) ->
-      Cons(indent-prefix(depth) ++ "\"" ++ data ++ "\"", Nil)
+      {
+        // html5lib tree-construction fixtures are read via Python text mode, so '\r' becomes '\n'.
+        // Normalize here to match the harness expectations without affecting tokenizer tests.
+        val cs = string/vector(data)
+        var out : list<char> := Nil
+        var i := 0
+        while(fn(){ i < cs.length }, fn(){
+          val c = cs[i]
+          out := Cons(if c == '\r' then '\n' else c, out)
+          i := i + 1
+        })
+        val s = string/listchar/string(out.reverse)
+        Cons(indent-prefix(depth) ++ "\"" ++ s ++ "\"", Nil)
+      }
     Comment(data) ->
       Cons(indent-prefix(depth) ++ "<!-- " ++ data ++ " -->", Nil)
     DoctypeNode(dt) ->
