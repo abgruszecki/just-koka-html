@@ -814,8 +814,11 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
       AfterHead ->
         match t
           TokComment(data) -> (append(st0, TComment(data)), False)
-          TokCharacter(_) ->
-            { val st1 = ensure-body(st0, Nil); (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True) }
+          TokCharacter(s) ->
+            if is-ws(s) then
+              (append(st0, TText(s)), False)
+            else
+              { val st1 = ensure-body(st0, Nil); (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True) }
           TokStartTag(name, attrs, _) ->
             if name == "frameset" then
               {
