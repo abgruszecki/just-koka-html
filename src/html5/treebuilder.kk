@@ -1243,6 +1243,12 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
             elif name == "table" then (add-error(st0), False)
             elif name == "colgroup" then
               { val st1 = start-tag(st0, name, attrs, selfClosing); (st(st1.stack, InColumnGroup, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False) }
+            elif name == "col" then
+              {
+                // Insert an implied <colgroup> and reprocess the <col> token in InColumnGroup.
+                val st1 = start-tag(st0, "colgroup", Nil, False)
+                (st(st1.stack, InColumnGroup, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True)
+              }
             elif is-table-section(name) then
               { val st1 = start-tag(st0, name, attrs, selfClosing); (st(st1.stack, InTableBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False) }
             elif name == "tr" then
