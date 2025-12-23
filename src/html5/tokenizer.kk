@@ -1034,10 +1034,18 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
         elif c == '>' then
           { emit-doctype(); state := SData }
         else
-          { doctype-force := True; state := SBogusDoctype }
+          // html5lib does not force quirks just for entering the bogus-doctype state here.
+          state := SBogusDoctype
       SBogusDoctype ->
         if c == '>' then
           { doctype-force := True; emit-doctype(); state := SData }
+        elif c == '\u0000' then
+          {
+            // html5lib treats NUL in bogus-doctype as ending the declaration without forcing quirks.
+            add-err("unexpected-null-character", i)
+            emit-doctype()
+            state := SData
+          }
         else
           ()
       SEndTagOpen ->
