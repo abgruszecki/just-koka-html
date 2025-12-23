@@ -748,8 +748,15 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
         elif c == '!' then
           state := SMarkupDeclOpen
         elif c == '?' then
-          // Bogus comment (e.g. "<?...").
-          { comment-acc := Nil; state := SBogusComment; reconsume(SBogusComment) }
+          {
+            // Bogus comment (e.g. "<?...").
+            // html5lib counts both a legacy and a modern error here.
+            add-err("expected-tag-name-but-got-question-mark", i)
+            add-err("unexpected-question-mark-instead-of-tag-name", i)
+            comment-acc := Nil
+            state := SBogusComment
+            reconsume(SBogusComment)
+          }
         elif is-ascii-alpha(c) then
           cur-is-end := False
           cur-name := Cons(lower-ascii(c), Nil)
@@ -778,6 +785,9 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
           i := i + 6
         else
           // Not a known declaration; parse as bogus comment.
+          // html5lib counts both a legacy and a modern error here.
+          add-err("expected-dashes-or-doctype", i)
+          add-err("incorrectly-opened-comment", i)
           comment-acc := Nil
           state := SBogusComment
           reconsume(SBogusComment)
@@ -785,14 +795,26 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
         if c == '-' then
           state := SCommentStartDash
         elif c == '>' then
-          { emit-token(TokComment("")); state := SData }
+          {
+            // html5lib counts both a legacy and a modern error here.
+            add-err("incorrect-comment", i)
+            add-err("abrupt-closing-of-empty-comment", i)
+            emit-token(TokComment(""))
+            state := SData
+          }
         else
           { comment-acc := Cons(repl-nul(c), comment-acc); state := SComment }
       SCommentStartDash ->
         if c == '-' then
           state := SCommentEnd
         elif c == '>' then
-          { emit-token(TokComment("")); state := SData }
+          {
+            // html5lib counts both a legacy and a modern error here.
+            add-err("incorrect-comment", i)
+            add-err("abrupt-closing-of-empty-comment", i)
+            emit-token(TokComment(""))
+            state := SData
+          }
         else
           { comment-acc := Cons('-', comment-acc); comment-acc := Cons(repl-nul(c), comment-acc); state := SComment }
       SComment ->
@@ -1196,7 +1218,9 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
     SCommentEndBang -> { add-eof-in-comment(eof-at); emit-token(TokComment(string/listchar/string(comment-acc.reverse))) }
     SEndTagOpen ->
       { text-acc := Cons('<', text-acc); text-acc := Cons('/', text-acc) }
-    SBogusComment -> { add-eof-in-comment(eof-at); emit-token(TokComment(string/listchar/string(comment-acc.reverse))) }
+    SBogusComment ->
+      // Bogus comments at EOF are not counted as "eof-in-comment" by html5lib's tree fixtures.
+      emit-token(TokComment(string/listchar/string(comment-acc.reverse)))
     SBeforeDoctypeName -> { doctype-force := True; emit-doctype() }
     SDoctypeName -> { doctype-force := True; emit-doctype() }
     SAfterDoctypeName -> { doctype-force := True; emit-doctype() }

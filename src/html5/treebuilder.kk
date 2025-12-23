@@ -786,10 +786,16 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
             else
               { val stack1 = pop-to(st0.stack, "head"); (st(stack1, AfterHead, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors), True) }
           TokCharacter(s) ->
-            if is-ws(s) then
-              (append(st0, TText(s)), False)
-            else
-              { val stack1 = pop-to(st0.stack, "head"); (st(stack1, AfterHead, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors), True) }
+            {
+              val (curName, _curNs) = current-element(st0.stack)
+              val nm = lower-ascii-string(curName)
+              if nm == "title" || nm == "style" || nm == "script" || nm == "noframes" then
+                (append(st0, TText(s)), False)
+              elif is-ws(s) then
+                (append(st0, TText(s)), False)
+              else
+                { val stack1 = pop-to(st0.stack, "head"); (st(stack1, AfterHead, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors), True) }
+            }
           TokComment(data) -> (append(st0, TComment(data)), False)
           TokDoctype(_,_,_,_) -> (st0, False)
           TokEOF ->
