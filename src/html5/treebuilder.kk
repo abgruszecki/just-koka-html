@@ -38,6 +38,11 @@ type mode {
   AfterBody
 }
 
+type fmtentry {
+  FmtMarker
+  FmtEntry(name: string, attrs: list<attr>, node: nodeid)
+}
+
 struct frame(kind: fkind, children: list<tnode>)
 
 struct dstate(
@@ -46,6 +51,7 @@ struct dstate(
   html-inserted: bool,
   head-inserted: bool,
   body-inserted: bool,
+  active: list<fmtentry>,
   errors: int
 )
 
@@ -391,7 +397,7 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
     Frame(fr.kind, Cons(child, fr.children))
 
   fun st( stack: list<frame>, imode: mode, html: bool, head: bool, body: bool, errors: int ) : dstate
-    Dstate(stack, imode, html, head, body, errors)
+    Dstate(stack, imode, html, head, body, Nil, errors)
 
   fun append(st0: dstate, child: tnode) : dstate
     match st0.stack
