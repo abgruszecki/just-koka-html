@@ -717,7 +717,7 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
                 end-tag(add-error(st0), tag)
               Cons(parent, restBelow) ->
                 match fmtFr.kind
-                  FEl(fmtName, fmtNs, fmtAttrs) ->
+                  FEl(_fmtName, _fmtNs, _fmtAttrs) ->
                     {
                       // First, "split" any inline formatting elements above the formatting element being closed.
                       // This approximates the adoption agency inner loop for common html5lib cases like:
