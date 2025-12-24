@@ -866,6 +866,20 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
             _ -> Cons(fr, go(rest))
     st(go(st0.stack), st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors)
 
+  fun merge-body-attrs(st0: dstate, attrs: list<attr>) : <div,exn> dstate
+    fun go(stack0: list<frame>) : <div,exn> list<frame>
+      match stack0
+        Nil -> Nil
+        Cons(fr, rest) ->
+          match fr.kind
+            FEl(nm, ns, old) ->
+              if is-html-ns(ns) && lower-ascii-string(nm) == "body" then
+                Cons(Frame(FEl(nm, ns, merge-attrs(old, attrs)), fr.children), rest)
+              else
+                Cons(fr, go(rest))
+            _ -> Cons(fr, go(rest))
+    st(go(st0.stack), st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors)
+
   fun is-formatting-element(name0: string) : <div,exn> bool
     val name = lower-ascii-string(name0)
     match name
@@ -1421,7 +1435,13 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
                 val st1 = merge-html-attrs(add-error(st0), attrs)
                 (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False)
               }
-            elif name == "head" || name == "body" then (st0, False)
+            elif name == "head" then (st0, False)
+            elif name == "body" then
+              {
+                // Merge new attributes (without overwriting) into the existing <body>.
+                val st1 = merge-body-attrs(add-error(st0), attrs)
+                (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False)
+              }
             elif name == "frame" then
               // Disallow <frame> in the body; ignore it.
               (add-error(st0), False)
