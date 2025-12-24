@@ -118,8 +118,23 @@ fun map-attr-name(name: string) : <div,exn> attrname
       val pre = slice-string(cs, 0, colon)
       val local = slice-string(cs, colon + 1, cs.length)
       match pre
-        "xlink" -> Attrname(XLink, local)
-        "xml" -> Attrname(Xml, local)
+        // HTML's foreign attribute adjustments are a whitelist:
+        // https://html.spec.whatwg.org/multipage/parsing.html#foreign-attribute-adjustments
+        "xlink" ->
+          match local
+            "actuate" -> Attrname(XLink, local)
+            "arcrole" -> Attrname(XLink, local)
+            "href" -> Attrname(XLink, local)
+            "role" -> Attrname(XLink, local)
+            "show" -> Attrname(XLink, local)
+            "title" -> Attrname(XLink, local)
+            "type" -> Attrname(XLink, local)
+            _ -> Attrname(None, name)
+        "xml" ->
+          match local
+            "lang" -> Attrname(Xml, local)
+            "space" -> Attrname(Xml, local)
+            _ -> Attrname(None, name)
         "xmlns" -> Attrname(Xmlns, local)
         _ -> Attrname(None, name)
     }
