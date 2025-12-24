@@ -353,6 +353,18 @@ fun build-tree(tokens: list<token>, initial: frame) : <div,exn> (children: list<
             _ -> go(rest)
     go(xs)
 
+  fun open-element-ns(xs: list<frame>, tag: string) : <div,exn> maybe<namespace>
+    val want = lower-ascii-string(tag)
+    fun go(ys: list<frame>) : <div,exn> maybe<namespace>
+      match ys
+        Nil -> Nothing
+        Cons(fr, rest) ->
+          match fr.kind
+            FEl(name, ns, _) ->
+              if lower-ascii-string(name) == want then Just(ns) else go(rest)
+            _ -> go(rest)
+    go(xs)
+
   fun consume(ts: list<token>)
     match ts
       Nil -> ()
@@ -591,6 +603,15 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
         match fr.kind
           FEl(elname,_,_) -> if lower-ascii-string(elname) == lower-ascii-string(name) then True else has-open(rest, name)
           _ -> has-open(rest, name)
+
+  fun open-element-ns(stack0: list<frame>, name: string) : <div,exn> maybe<namespace>
+    match stack0
+      Nil -> Nothing
+      Cons(fr, rest) ->
+        match fr.kind
+          FEl(elname, ns, _) ->
+            if lower-ascii-string(elname) == lower-ascii-string(name) then Just(ns) else open-element-ns(rest, name)
+          _ -> open-element-ns(rest, name)
 
   fun pop-to(stack0: list<frame>, name: string) : <div,exn> list<frame>
     match stack0
@@ -1622,42 +1643,58 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
                   (st2, False)
               }
           TokEndTag(name) ->
-            if name == "body" then
-              {
-                // Per spec/html5lib: do not pop <body> here; just switch modes.
-                val st0i = generate-implied-end-tags(st0, "")
-                val (curName, _curNs) = current-element(st0i.stack)
-                val stx = if lower-ascii-string(curName) == "body" then st0i else add-error(st0i)
-                val st1 = end-tag(stx, "body")
-                (st(st1.stack, AfterBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False)
-              }
-            elif name == "html" then
-              if top-is-doc(st0.stack) then
-                // After the <html> element has already been closed, a stray </html> should transition
-                // back to AfterAfterBody so trailing comments can attach to the document.
-                (st(st0.stack, AfterAfterBody, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors), False)
-              else
-                (st0, False)
-            elif name == "br" then
-              (start-tag(add-error(st0), "br", Nil, True), False)
-            elif name == "template" && in-template-content(st0.stack) then
-              // html5lib's template fixture counts a mismatch error when </template> appears while there are still
-              // unclosed elements in the template content.
-              match st0.stack
-                Cons(fr, _) ->
-                  match fr.kind
-                    FTemplateContent -> (end-tag(st0, "template"), False)
-                    _ -> (end-tag(add-error(st0), "template"), False)
-                _ -> (end-tag(add-error(st0), "template"), False)
-            else
-              if has-open(st0.stack, name) then
-                if is-formatting-element(name) then
-                  (adoption-end-tag(st0, name), False)
+            // Foreign-content end tags: if we are in a foreign namespace and see an end tag for a
+            // different foreign element that is still open, count a parse error before popping.
+            {
+              val (curName0, curNs) = current-element(st0.stack)
+              val curName = lower-ascii-string(curName0)
+              val endName = lower-ascii-string(name)
+              val stForeign =
+                if !is-html-ns(curNs) && curName != endName then
+                  match open-element-ns(st0.stack, name)
+                    Just(nsFound) -> if !is-html-ns(nsFound) then add-error(st0) else st0
+                    _ -> st0
                 else
-                  (end-tag(st0, name), False)
+                  st0
+              // Continue processing using the (possibly error-charged) state.
+              val st0x = stForeign
+              if name == "body" then
+                {
+                  // Per spec/html5lib: do not pop <body> here; just switch modes.
+                  val st0i = generate-implied-end-tags(st0x, "")
+                  val (curName1, _curNs) = current-element(st0i.stack)
+                  val stx = if lower-ascii-string(curName1) == "body" then st0i else add-error(st0i)
+                  val st1 = end-tag(stx, "body")
+                  (st(st1.stack, AfterBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False)
+                }
+              elif name == "html" then
+                if top-is-doc(st0x.stack) then
+                  // After the <html> element has already been closed, a stray </html> should transition
+                  // back to AfterAfterBody so trailing comments can attach to the document.
+                  (st(st0x.stack, AfterAfterBody, st0x.html-inserted, st0x.head-inserted, st0x.body-inserted, st0x.errors), False)
+                else
+                  (st0x, False)
+              elif name == "br" then
+                (start-tag(add-error(st0x), "br", Nil, True), False)
+              elif name == "template" && in-template-content(st0x.stack) then
+                // html5lib's template fixture counts a mismatch error when </template> appears while there are still
+                // unclosed elements in the template content.
+                match st0x.stack
+                  Cons(fr, _) ->
+                    match fr.kind
+                      FTemplateContent -> (end-tag(st0x, "template"), False)
+                      _ -> (end-tag(add-error(st0x), "template"), False)
+                  _ -> (end-tag(add-error(st0x), "template"), False)
               else
-                // Treat stray end tags as parse errors (html5lib tree tests count these).
-                (st(st0.stack, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors + 1), False)
+                if has-open(st0x.stack, name) then
+                  if is-formatting-element(name) then
+                    (adoption-end-tag(st0x, name), False)
+                  else
+                    (end-tag(st0x, name), False)
+                else
+                  // Treat stray end tags as parse errors (html5lib tree tests count these).
+                  (st(st0x.stack, st0x.imode, st0x.html-inserted, st0x.head-inserted, st0x.body-inserted, st0x.errors + 1), False)
+            }
           TokCharacter(s) ->
             if s == "" then (st0, False)
             elif top-is-doc(st0.stack) && st0.body-inserted then
@@ -1772,6 +1809,30 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
               }
             elif name == "option" then
               (start-tag(add-error(st0), name, attrs, selfClosing), False)
+            elif name == "input" then
+              {
+                fun is-hidden-type(attrs0: list<attr>)
+                  match attrs0
+                    Nil -> False
+                    Cons(Attr(an, v), rest) ->
+                      match an
+                        Attrname(None, local) ->
+                          if lower-ascii-string(local) == "type" && lower-ascii-string(v) == "hidden" then True else is-hidden-type(rest)
+                        _ -> is-hidden-type(rest)
+
+                val st1 = add-error(st0)
+                if is-hidden-type(attrs) then
+                  // Per spec/html5lib: hidden inputs don't use foster parenting, but still count a parse error.
+                  (start-tag(st1, name, attrs, selfClosing), False)
+                else
+                  {
+                    val ns0 = element-ns(st1.stack, name)
+                    val ns = ns0
+                    val adjName = adjust-tag-name(ns, name)
+                    val attrs1 = adjust-attrs(ns, attrs)
+                    (foster-append(st1, TEl(adjName, ns, attrs1, Nil)), False)
+                  }
+              }
             elif name == "style" || name == "script" then
               (start-tag(st0, name, attrs, selfClosing), False)
             else

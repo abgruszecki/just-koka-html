@@ -406,6 +406,46 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
   var doctype-saw-ws := False
   var last-start := lastStartTag
   var tag-next-state := SData
+  // Track whether we are in a context where "rawtext-ish" auto-switching should apply.
+  // The real HTML parser drives this from the treebuilder and foreign-content integration
+  // points; here we approximate from a minimal start/end-tag stack.
+  fun is-svg-integration-point(name0: string) : <div,exn> bool
+    val name = lower-ascii-string(name0)
+    name == "foreignobject" || name == "desc" || name == "title"
+
+  fun is-math-text-integration-point(name0: string) : <div,exn> bool
+    val name = lower-ascii-string(name0)
+    name == "mi" || name == "mo" || name == "mn" || name == "ms" || name == "mtext"
+
+  fun child-autoswitch(parentAuto: bool, tagName0: string) : <div,exn> bool
+    val tagName = lower-ascii-string(tagName0)
+    if parentAuto then
+      if tagName == "svg" || tagName == "math" then False else True
+    else
+      if is-svg-integration-point(tagName) || is-math-text-integration-point(tagName) then True else False
+
+  // Stack of open elements, storing (lowercase tag name, autoswitch-ok-for-children).
+  var ctx-stack : list<(string, bool)> := Cons(("#document", True), Nil)
+
+  fun cur-autoswitch-ok()
+    match ctx-stack
+      Cons((_, ok), _) -> ok
+      _ -> True
+
+  fun push-ctx(tagName0: string)
+    val ok = child-autoswitch(cur-autoswitch-ok(), tagName0)
+    ctx-stack := Cons((lower-ascii-string(tagName0), ok), ctx-stack)
+
+  fun pop-ctx(tagName0: string)
+    val want = lower-ascii-string(tagName0)
+    fun go(xs: list<(string, bool)>) : list<(string, bool)>
+      match xs
+        Nil -> xs
+        Cons((nm, _ok), rest) ->
+          if nm == "#document" then xs
+          elif nm == want then rest
+          else go(rest)
+    ctx-stack := go(ctx-stack)
   var cur-pos := 0
   var pending-endtag-solidus := False
   var endtag-solidus-saw-non-gt := False
@@ -459,7 +499,7 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
     tag-next-state := SData
     endtag-attr-error-emitted := False
     endtag-solidus-saw-non-gt := False
-    if (!cur-is-end && autoSwitch && !cur-selfclosing) then
+    if (!cur-is-end && autoSwitch && cur-autoswitch-ok() && !cur-selfclosing) then
       match name
         "textarea" -> { last-start := Just(name); tag-next-state := SRCDATA }
         "title" -> { last-start := Just(name); tag-next-state := SRCDATA }
@@ -476,6 +516,11 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
       emit-token(TokEndTag(name))
     else
       emit-token(TokStartTag(name, cur-attrs.reverse, cur-selfclosing))
+    // Update the minimal context stack (used for deciding whether auto-switch is allowed).
+    if cur-is-end then
+      pop-ctx(name)
+    else
+      if !cur-selfclosing then push-ctx(name) else ()
     cur-is-end := False
     cur-name := Nil
     cur-attrs := Nil
@@ -1252,6 +1297,7 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
     SRAWTEXTEndTagName -> emit-temp-as-text()
     SScriptDataEndTagName -> emit-temp-as-text()
     STagName -> { add-err("eof-in-tag-name", eof-at); add-err("eof-in-tag", eof-at) }
+    SAttrValueDQ -> { add-err("eof-in-attribute-value-double-quote", eof-at); add-err("eof-in-tag", eof-at) }
     SCommentStart -> { add-eof-in-comment(eof-at); emit-token(TokComment("")) }
     SCommentStartDash -> { add-eof-in-comment(eof-at); emit-token(TokComment("")) }
     SComment -> { add-eof-in-comment(eof-at); emit-token(TokComment(string/listchar/string(comment-acc.reverse))) }
