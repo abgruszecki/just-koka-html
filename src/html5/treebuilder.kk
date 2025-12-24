@@ -1073,6 +1073,45 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
       "u" -> True
       _ -> False
 
+  fun is-heading-element(name0: string) : <div,exn> bool
+    val name = lower-ascii-string(name0)
+    match name
+      "h1" -> True
+      "h2" -> True
+      "h3" -> True
+      "h4" -> True
+      "h5" -> True
+      "h6" -> True
+      _ -> False
+
+  fun has-heading-in-scope(stack0: list<frame>) : <div,exn> bool
+    fun go(xs: list<frame>) : <div,exn> bool
+      match xs
+        Nil -> False
+        Cons(fr, rest) ->
+          match fr.kind
+            FEl(nm, ns, _) ->
+              val name = lower-ascii-string(nm)
+              if is-html-ns(ns) && is-heading-element(name) then True
+              elif is-scope-boundary(name, ns) then False
+              else go(rest)
+            _ -> go(rest)
+    go(stack0)
+
+  fun nearest-heading-in-scope(stack0: list<frame>) : <div,exn> maybe<string>
+    fun go(xs: list<frame>) : <div,exn> maybe<string>
+      match xs
+        Nil -> Nothing
+        Cons(fr, rest) ->
+          match fr.kind
+            FEl(nm, ns, _) ->
+              val name = lower-ascii-string(nm)
+              if is-html-ns(ns) && is-heading-element(name) then Just(name)
+              elif is-scope-boundary(name, ns) then Nothing
+              else go(rest)
+            _ -> go(rest)
+    go(stack0)
+
   fun is-special-for-adoption(name0: string) : <div,exn> bool
     // "Special" elements, simplified (enough for html5lib adoption01/02 fixtures).
     val name = lower-ascii-string(name0)
@@ -1742,6 +1781,24 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
                       FTemplateContent -> (end-tag(st0x, "template"), False)
                       _ -> (end-tag(add-error(st0x), "template"), False)
                   _ -> (end-tag(add-error(st0x), "template"), False)
+              elif is-heading-element(name) then
+                if !has-heading-in-scope(st0x.stack) then
+                  (add-error(st0x), False)
+                else
+                  {
+                    val st0i = generate-implied-end-tags(st0x, "")
+                    val (curName1, _curNs1) = current-element(st0i.stack)
+                    val stx = if lower-ascii-string(curName1) == lower-ascii-string(name) then st0i else add-error(st0i)
+                    match nearest-heading-in-scope(stx.stack)
+                      Just(hname) ->
+                        {
+                          val stack1 = pop-to(stx.stack, hname)
+                          (st(stack1, stx.imode, stx.html-inserted, stx.head-inserted, stx.body-inserted, stx.errors), False)
+                        }
+                      _ ->
+                        // Defensive fallback; shouldn't happen since `has-heading-in-scope` was true.
+                        (stx, False)
+                  }
               else
                 if has-open(st0x.stack, name) then
                   if is-formatting-element(name) then
