@@ -495,6 +495,24 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
           else Nothing
         _ -> Nothing
 
+    fun add-to-html-node(n: tnode) : <div,exn> maybe<tnode>
+      match n
+        TEl(name, ns, attrs, kids) ->
+          if is-html-ns(ns) && lower-ascii-string(name) == "html" then
+            {
+              fun go(kids0: list<tnode>, acc: list<tnode>) : <div,exn> (found: bool, out: list<tnode>)
+                match kids0
+                  Nil -> (False, acc)
+                  Cons(k, rest) ->
+                    match add-to-body-node(k)
+                      Just(k2) -> (True, acc ++ Cons(k2, rest))
+                      Nothing -> go(rest, acc ++ Cons(k, Nil))
+              val (found, kids2) = go(kids, Nil)
+              if found then Just(TEl(name, ns, attrs, kids2)) else Nothing
+            }
+          else Nothing
+        _ -> Nothing
+
     fun add-to-html-frame(fr: frame) : <div,exn> maybe<frame>
       match fr.kind
         FEl(nm, ns, _attrs) ->
@@ -526,7 +544,42 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
 
     match go(st0.stack)
       Just(stack1) -> st(stack1, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors)
-      Nothing -> append(st0, child)
+      Nothing ->
+        {
+          // If the <html> element has already been closed into the document, update the closed tree.
+          fun update-doc(stack0: list<frame>) : <div,exn> maybe<list<frame>>
+            match stack0
+              Nil -> Nothing
+              Cons(fr, rest) ->
+                match fr.kind
+                  FDoc ->
+                    {
+                      fun goKids(xs: list<tnode>, acc: list<tnode>) : <div,exn> (found: bool, out: list<tnode>)
+                        match xs
+                          Nil -> (False, acc)
+                          Cons(n, rest2) ->
+                            match add-to-html-node(n)
+                              Just(n2) -> (True, acc ++ Cons(n2, rest2))
+                              Nothing -> goKids(rest2, acc ++ Cons(n, Nil))
+                      val (found, kids2) = goKids(fr.children, Nil)
+                      if found then Just(Cons(Frame(fr.kind, kids2), rest)) else Nothing
+                    }
+                  _ ->
+                    match update-doc(rest)
+                      Just(tail) -> Just(Cons(fr, tail))
+                      Nothing -> Nothing
+          match update-doc(st0.stack)
+            Just(stack2) -> st(stack2, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors)
+            Nothing -> append(st0, child)
+        }
+
+  fun top-is-doc(stack0: list<frame>) : bool
+    match stack0
+      Cons(fr, _) ->
+        match fr.kind
+          FDoc -> True
+          _ -> False
+      _ -> False
 
   fun push-el(st0: dstate, name: string, ns: namespace, attrs: list<attr>) : dstate
     st(Cons(Frame(FEl(name, ns, attrs), Nil), st0.stack), st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors)
@@ -1600,8 +1653,16 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
                 // Treat stray end tags as parse errors (html5lib tree tests count these).
                 (st(st0.stack, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors + 1), False)
           TokCharacter(s) ->
-            if s == "" then (st0, False) else (append(st0, TText(s)), False)
-          TokComment(data) -> (append(st0, TComment(data)), False)
+            if s == "" then (st0, False)
+            elif top-is-doc(st0.stack) && st0.body-inserted then
+              (append-into-body(st0, TText(s)), False)
+            else
+              (append(st0, TText(s)), False)
+          TokComment(data) ->
+            if top-is-doc(st0.stack) && st0.body-inserted then
+              (append-into-body(st0, TComment(data)), False)
+            else
+              (append(st0, TComment(data)), False)
           TokDoctype(_,_,_,_) -> (st0, False)
           TokEOF -> (add-eof-error(st0), False)
       InFrameset ->
