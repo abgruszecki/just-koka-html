@@ -1714,8 +1714,7 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
                       val st0i = generate-implied-end-tags(st0x, "")
                       val (curName1, _curNs) = current-element(st0i.stack)
                       val stx = if lower-ascii-string(curName1) == "body" then st0i else add-error(st0i)
-                      val st1 = end-tag(stx, "body")
-                      (st(st1.stack, AfterBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False)
+                      (st(stx.stack, AfterBody, stx.html-inserted, stx.head-inserted, stx.body-inserted, stx.errors), False)
                     }
                 }
               elif name == "html" then
@@ -2165,7 +2164,13 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
         match t
           TokComment(data) ->
             // Spec: comment after body is appended to <html>, not <body>.
-            (append(st0, TComment(data)), False)
+            // Our stack model only attaches child elements to parents on pop/close, so if <body>
+            // (and other elements) are still open, close them first so the comment becomes a sibling.
+            {
+              val stack1 = if has-open(st0.stack, "body") then pop-to(st0.stack, "body") else st0.stack
+              val st1 = st(stack1, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors)
+              (append(st1, TComment(data)), False)
+            }
           TokCharacter(s) ->
             if is-ws(s) then
               // Spec: whitespace after body is inserted using InBody rules but we stay in AfterBody.
