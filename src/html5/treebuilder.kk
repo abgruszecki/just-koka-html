@@ -1399,8 +1399,11 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
               }
             else
               { val st1 = ensure-head(st0, Nil); (st(st1.stack, InHead, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True) }
-          TokEndTag(_) ->
-            { val st1 = ensure-head(st0, Nil); (st(st1.stack, InHead, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True) }
+          TokEndTag(name) ->
+            if name == "head" || name == "body" || name == "html" || name == "br" then
+              { val st1 = ensure-head(st0, Nil); (st(st1.stack, InHead, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True) }
+            else
+              (add-error(st0), False)
           TokEOF ->
             { val st1 = ensure-head(st0, Nil); (st(st1.stack, InHead, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True) }
           TokDoctype(_,_,_,_) ->
@@ -1596,8 +1599,12 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
               // We don't keep these head elements open on the stack in AfterHead;
               // swallow their end tags to avoid counting them as stray.
               (st0, False)
-            else
+            elif name == "head" then
+              (add-error(st0), False)
+            elif name == "body" || name == "html" || name == "br" then
               { val st1 = ensure-body(st0, Nil); (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True) }
+            else
+              (add-error(st0), False)
           TokDoctype(_,_,_,_) -> (st0, False)
           TokEOF ->
             { val st1 = ensure-body(st0, Nil); (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True) }
