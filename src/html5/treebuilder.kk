@@ -855,11 +855,13 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
       "aside" -> True
       "blockquote" -> True
       "center" -> True
+      "dd" -> True
       "details" -> True
       "dialog" -> True
       "dir" -> True
       "div" -> True
       "dl" -> True
+      "dt" -> True
       "fieldset" -> True
       "figcaption" -> True
       "figure" -> True
@@ -914,6 +916,23 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
             FEl(nm, ns, _) ->
               val name = lower-ascii-string(nm)
               if is-html-ns(ns) && name == target then True
+              elif is-scope-boundary(name, ns) then False
+              else go(rest)
+            _ -> go(rest)
+    go(stack0)
+
+  fun has-in-definition-scope(stack0: list<frame>, target0: string) : <div,exn> bool
+    // Like `has-in-scope`, but `<dl>` is also a scope terminator.
+    val target = lower-ascii-string(target0)
+    fun go(xs: list<frame>) : <div,exn> bool
+      match xs
+        Nil -> False
+        Cons(fr, rest) ->
+          match fr.kind
+            FEl(nm, ns, _) ->
+              val name = lower-ascii-string(nm)
+              if is-html-ns(ns) && name == target then True
+              elif is-html-ns(ns) && name == "dl" then False
               elif is-scope-boundary(name, ns) then False
               else go(rest)
             _ -> go(rest)
@@ -1705,6 +1724,27 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
                     if curLow == "rb" || curLow == "rp" || curLow == "rt" || curLow == "rtc" then
                       generate-implied-end-tags(stx, "")
                     else stx
+                  (start-tag(st1, name, attrs, selfClosing), False)
+                }
+              elif name == "dd" || name == "dt" then
+                {
+                  fun close-dd-dt(stx0: dstate, target: string) : <div,exn> dstate
+                    if !has-in-definition-scope(stx0.stack, target) then stx0
+                    else
+                      {
+                        val stack1 = pop-to(stx0.stack, target)
+                        st(stack1, stx0.imode, stx0.html-inserted, stx0.head-inserted, stx0.body-inserted, stx0.errors)
+                      }
+
+                  val st1 =
+                    if name == "dd" then
+                      if has-in-definition-scope(stx.stack, "dd") then close-dd-dt(stx, "dd")
+                      elif has-in-definition-scope(stx.stack, "dt") then close-dd-dt(stx, "dt")
+                      else stx
+                    else
+                      if has-in-definition-scope(stx.stack, "dt") then close-dd-dt(stx, "dt")
+                      elif has-in-definition-scope(stx.stack, "dd") then close-dd-dt(stx, "dd")
+                      else stx
                   (start-tag(st1, name, attrs, selfClosing), False)
                 }
               elif name == "frame" then
