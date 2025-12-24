@@ -789,6 +789,8 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
           state := STagName
         else
           // Not a tag; emit '<' and reconsume.
+          add-err("expected-tag-name", i)
+          add-err("invalid-first-character-of-tag-name", i)
           text-acc := Cons('<', text-acc)
           reconsume(SData)
       SMarkupDeclOpen ->
@@ -1224,6 +1226,10 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
             state := tag-next-state
           }
         else
+          if !cur-is-end then
+            { add-err("unexpected-character-after-solidus-in-tag", i); add-err("unexpected-solidus-in-tag", i) }
+          else
+            ()
           if cur-is-end && pending-endtag-solidus then
             { endtag-solidus-saw-non-gt := True; add-err("unexpected-character-after-solidus-in-tag", i); add-err("unexpected-solidus-in-tag", i); pending-endtag-solidus := False }
           reconsume(SBeforeAttrName)
