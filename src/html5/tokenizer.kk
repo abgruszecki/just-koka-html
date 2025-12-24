@@ -1084,6 +1084,10 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
           state := STagName
         else
           // Parse as bogus comment.
+          if is-ws(c) then
+            add-err("expected-closing-tag-but-got-char", i)
+          else
+            ()
           add-err("invalid-first-character-of-tag-name", i)
           comment-acc := Nil
           state := SBogusComment
@@ -1241,6 +1245,7 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
     SRCDATAEndTagName -> emit-temp-as-text()
     SRAWTEXTEndTagName -> emit-temp-as-text()
     SScriptDataEndTagName -> emit-temp-as-text()
+    STagName -> { add-err("eof-in-tag-name", eof-at); add-err("eof-in-tag", eof-at) }
     SCommentStart -> { add-eof-in-comment(eof-at); emit-token(TokComment("")) }
     SCommentStartDash -> { add-eof-in-comment(eof-at); emit-token(TokComment("")) }
     SComment -> { add-eof-in-comment(eof-at); emit-token(TokComment(string/listchar/string(comment-acc.reverse))) }
