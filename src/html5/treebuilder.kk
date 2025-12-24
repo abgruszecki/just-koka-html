@@ -1604,59 +1604,82 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
       InBody ->
         match t
           TokStartTag(name, attrs, selfClosing) ->
-            if name == "html" then
-              {
-                val st1 = merge-html-attrs(add-error(st0), attrs)
-                (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False)
-              }
-            elif name == "head" then (st0, False)
-            elif name == "body" then
-              {
-                // Merge new attributes (without overwriting) into the existing <body>.
-                val st1 = merge-body-attrs(add-error(st0), attrs)
-                (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False)
-              }
-            elif name == "rp" || name == "rt" then
-              {
-                // Ruby annotations: generate implied end tags (excluding "rtc") before inserting <rp>/<rt>.
-                val st1 = generate-implied-end-tags(st0, "rtc")
-                (start-tag(st1, name, attrs, selfClosing), False)
-              }
-            elif name == "rb" || name == "rtc" then
-              {
-                // If we are already in ruby annotation content, close implied tags first.
-                val (curName, _curNs) = current-element(st0.stack)
-                val curLow = lower-ascii-string(curName)
-                val st1 =
-                  if curLow == "rb" || curLow == "rp" || curLow == "rt" || curLow == "rtc" then
-                    generate-implied-end-tags(st0, "")
-                  else st0
-                (start-tag(st1, name, attrs, selfClosing), False)
-              }
-            elif name == "frame" then
-              // Disallow <frame> in the body; ignore it.
-              (add-error(st0), False)
-            elif name == "button" then
-              {
-                // If a <button> is already in scope, close it before inserting a new one.
-                val st1 =
-                  if has-in-scope(st0.stack, "button") then
-                    st(pop-to(add-error(st0).stack, "button"), st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors + 1)
+            {
+              fun close-select-for-hr(stx: dstate, nextName0: string) : <div,exn> dstate
+                {
+                  val nextName = lower-ascii-string(nextName0)
+                  if nextName != "hr" || !has-open(stx.stack, "select") then stx
                   else
-                    st0
-                (start-tag(st1, name, attrs, selfClosing), False)
-              }
-            else
-              {
-                val ns = element-ns(st0.stack, name)
-                val adj = adjust-tag-name(ns, name)
-                val st1 = if is-html-ns(ns) then close-p-if-needed(st0, adj) else st0
-                val st2 = start-tag(st1, name, attrs, selfClosing)
-                if is-html-ns(ns) && adj == "table" && !selfClosing then
-                  (st(st2.stack, InTable, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors), False)
-                else
-                  (st2, False)
-              }
+                    {
+                      val (curName0, _curNs) = current-element(stx.stack)
+                      val curName = lower-ascii-string(curName0)
+                      val st1 =
+                        if curName == "option" then
+                          st(pop-to(stx.stack, "option"), stx.imode, stx.html-inserted, stx.head-inserted, stx.body-inserted, stx.errors)
+                        else stx
+                      val (curName1, _curNs1) = current-element(st1.stack)
+                      val cur2 = lower-ascii-string(curName1)
+                      if cur2 == "optgroup" then
+                        st(pop-to(st1.stack, "optgroup"), st1.imode, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors)
+                      else st1
+                    }
+                }
+
+              val stx = close-select-for-hr(st0, name)
+              if name == "html" then
+                {
+                  val st1 = merge-html-attrs(add-error(stx), attrs)
+                  (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False)
+                }
+              elif name == "head" then (stx, False)
+              elif name == "body" then
+                {
+                  // Merge new attributes (without overwriting) into the existing <body>.
+                  val st1 = merge-body-attrs(add-error(stx), attrs)
+                  (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False)
+                }
+              elif name == "rp" || name == "rt" then
+                {
+                  // Ruby annotations: generate implied end tags (excluding "rtc") before inserting <rp>/<rt>.
+                  val st1 = generate-implied-end-tags(stx, "rtc")
+                  (start-tag(st1, name, attrs, selfClosing), False)
+                }
+              elif name == "rb" || name == "rtc" then
+                {
+                  // If we are already in ruby annotation content, close implied tags first.
+                  val (curName, _curNs) = current-element(stx.stack)
+                  val curLow = lower-ascii-string(curName)
+                  val st1 =
+                    if curLow == "rb" || curLow == "rp" || curLow == "rt" || curLow == "rtc" then
+                      generate-implied-end-tags(stx, "")
+                    else stx
+                  (start-tag(st1, name, attrs, selfClosing), False)
+                }
+              elif name == "frame" then
+                // Disallow <frame> in the body; ignore it.
+                (add-error(stx), False)
+              elif name == "button" then
+                {
+                  // If a <button> is already in scope, close it before inserting a new one.
+                  val st1 =
+                    if has-in-scope(stx.stack, "button") then
+                      st(pop-to(add-error(stx).stack, "button"), stx.imode, stx.html-inserted, stx.head-inserted, stx.body-inserted, stx.errors + 1)
+                    else
+                      stx
+                  (start-tag(st1, name, attrs, selfClosing), False)
+                }
+              else
+                {
+                  val ns = element-ns(stx.stack, name)
+                  val adj = adjust-tag-name(ns, name)
+                  val st1 = if is-html-ns(ns) then close-p-if-needed(stx, adj) else stx
+                  val st2 = start-tag(st1, name, attrs, selfClosing)
+                  if is-html-ns(ns) && adj == "table" && !selfClosing then
+                    (st(st2.stack, InTable, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors), False)
+                  else
+                    (st2, False)
+                }
+            }
           TokEndTag(name) ->
             // Foreign-content end tags: if we are in a foreign namespace and see an end tag for a
             // different foreign element that is still open, count a parse error before popping.
