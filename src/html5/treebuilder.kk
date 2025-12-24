@@ -30,6 +30,7 @@ type mode {
   InBody
   InFrameset
   AfterFrameset
+  AfterAfterFrameset
   InTable
   InTableBody
   InColumnGroup
@@ -721,11 +722,6 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
         }
       elif selfClosing || (is-html-ns(ns) && is-void-element(name)) then
         insert-void(st0, name, ns, attrs1)
-      else if (is-html-ns(ns) && name == "p" && has-open(st0.stack, "p")) then
-        {
-          val stack1 = pop-to(st0.stack, "p")
-          push-el(st(stack1, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors), name, ns, attrs1)
-        }
       else
         push-el(st0, name, ns, attrs1)
     }
@@ -1046,6 +1042,25 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
         else merge-attrs(Cons(a, keepFirst), rest)
 
   fun merge-html-attrs(st0: dstate, attrs: list<attr>) : <div,exn> dstate
+    fun merge-html-tnode(n: tnode) : <div,exn> maybe<tnode>
+      match n
+        TEl(name, ns, old, kids) ->
+          if is-html-ns(ns) && lower-ascii-string(name) == "html" then
+            Just(TEl(name, ns, merge-attrs(old, attrs), kids))
+          else Nothing
+        _ -> Nothing
+
+    fun merge-in-children(xs: list<tnode>) : <div,exn> maybe<list<tnode>>
+      match xs
+        Nil -> Nothing
+        Cons(n, rest) ->
+          match merge-html-tnode(n)
+            Just(n2) -> Just(Cons(n2, rest))
+            Nothing ->
+              match merge-in-children(rest)
+                Just(rest2) -> Just(Cons(n, rest2))
+                Nothing -> Nothing
+
     fun go(stack0: list<frame>) : <div,exn> list<frame>
       match stack0
         Nil -> Nil
@@ -1056,6 +1071,10 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
                 Cons(Frame(FEl(nm, ns, merge-attrs(old, attrs)), fr.children), rest)
               else
                 Cons(fr, go(rest))
+            FDoc ->
+              match merge-in-children(fr.children)
+                Just(kids2) -> Cons(Frame(FDoc, kids2), rest)
+                Nothing -> Cons(fr, go(rest))
             _ -> Cons(fr, go(rest))
     st(go(st0.stack), st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors)
 
@@ -1072,6 +1091,51 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
                 Cons(fr, go(rest))
             _ -> Cons(fr, go(rest))
     st(go(st0.stack), st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors)
+
+  fun append-into-html-node(st0: dstate, child: tnode) : <div,exn> dstate
+    // Append a child into the existing <html> element even when it has already been popped into the document.
+    fun add-to-html(n: tnode) : <div,exn> maybe<tnode>
+      match n
+        TEl(name, ns, attrs, kids) ->
+          if is-html-ns(ns) && lower-ascii-string(name) == "html" then
+            Just(TEl(name, ns, attrs, kids ++ Cons(child, Nil)))
+          else Nothing
+        _ -> Nothing
+
+    fun add-to-doc(fr: frame) : <div,exn> maybe<frame>
+      match fr.kind
+        FDoc ->
+          {
+            fun go(xs: list<tnode>) : <div,exn> maybe<list<tnode>>
+              match xs
+                Nil -> Nothing
+                Cons(n, rest) ->
+                  match add-to-html(n)
+                    Just(n2) -> Just(Cons(n2, rest))
+                    Nothing ->
+                      match go(rest)
+                        Just(rest2) -> Just(Cons(n, rest2))
+                        Nothing -> Nothing
+            match go(fr.children)
+              Just(kids2) -> Just(Frame(FDoc, kids2))
+              Nothing -> Nothing
+          }
+        _ -> Nothing
+
+    fun go(stack0: list<frame>) : <div,exn> maybe<list<frame>>
+      match stack0
+        Nil -> Nothing
+        Cons(fr, rest) ->
+          match add-to-doc(fr)
+            Just(fr2) -> Just(Cons(fr2, rest))
+            Nothing ->
+              match go(rest)
+                Just(tail) -> Just(Cons(fr, tail))
+                Nothing -> Nothing
+
+    match go(st0.stack)
+      Just(stack1) -> st(stack1, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors)
+      Nothing -> st0
 
   fun is-formatting-element(name0: string) : <div,exn> bool
     val name = lower-ascii-string(name0)
@@ -1905,12 +1969,35 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
               }
           TokComment(data) -> (append(st0, TComment(data)), False)
           TokEndTag(name) ->
-            if name == "html" then (st0, False) else (add-error(st0), False)
+            if name == "html" then
+              {
+                val st1 = end-tag(st0, "html")
+                (st(st1.stack, AfterAfterFrameset, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False)
+              }
+            else
+              (add-error(st0), False)
           TokStartTag(name, attrs, _) ->
             if name == "html" then
               (merge-html-attrs(add-error(st0), attrs), False)
             else
               (add-error(st0), False)
+          TokDoctype(_,_,_,_) -> (add-error(st0), False)
+          TokEOF -> (add-eof-error(st0), False)
+      AfterAfterFrameset ->
+        match t
+          TokComment(data) -> (append(st0, TComment(data)), False)
+          TokCharacter(s) ->
+            if is-ws(s) then
+              (append-into-html-node(st0, TText(s)), False)
+            else
+              (add-error(st0), False)
+          TokStartTag(name, attrs, _) ->
+            if name == "html" then
+              (merge-html-attrs(add-error(st0), attrs), False)
+            else
+              (add-error(st0), False)
+          TokEndTag(name) ->
+            if name == "html" then (st0, False) else (add-error(st0), False)
           TokDoctype(_,_,_,_) -> (add-error(st0), False)
           TokEOF -> (add-eof-error(st0), False)
       InTable ->
