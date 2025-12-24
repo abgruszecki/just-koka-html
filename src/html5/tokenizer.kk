@@ -488,7 +488,7 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
       Just(last0) ->
         {
           val want = lower-ascii-string(last0.trim)
-          val got = string/listchar/string(tmp.reverse)
+          val got = lower-ascii-string(string/listchar/string(tmp.reverse))
           got != "" && got == want
         }
 
@@ -571,16 +571,16 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
           { text-acc := Cons('<', text-acc); reconsume(SRCDATA) }
       SRCDATAEndTagOpen ->
         if is-ascii-alpha(c) then
-          { temp-buffer := Cons(lower-ascii(c), Nil); cur-name := Cons(lower-ascii(c), Nil); cur-is-end := True; state := SRCDATAEndTagName }
+          { temp-buffer := Cons(repl-nul(c), Nil); cur-name := Cons(lower-ascii(c), Nil); cur-is-end := True; state := SRCDATAEndTagName }
         else
           { text-acc := Cons('<', text-acc); text-acc := Cons('/', text-acc); reconsume(SRCDATA) }
       SRCDATAEndTagName ->
         if is-ascii-alnum(c) then
-          { temp-buffer := Cons(lower-ascii(c), temp-buffer); cur-name := Cons(lower-ascii(c), cur-name) }
+          { temp-buffer := Cons(repl-nul(c), temp-buffer); cur-name := Cons(lower-ascii(c), cur-name) }
         elif (is-ws(c) || c == '/' || c == '>') then
           if is-appropriate-end-tag(last-start, temp-buffer) then
             if c == '>' then
-              { emit-token(TokEndTag(string/listchar/string(temp-buffer.reverse))); temp-buffer := Nil; state := SData }
+              { emit-token(TokEndTag(lower-ascii-string(string/listchar/string(temp-buffer.reverse)))); temp-buffer := Nil; state := SData }
             elif c == '/' then
               { pending-endtag-solidus := True; endtag-solidus-saw-non-gt := False; state := SSelfClosingStartTag }
             else
@@ -596,16 +596,16 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
           { text-acc := Cons('<', text-acc); reconsume(SRAWTEXT) }
       SRAWTEXTEndTagOpen ->
         if is-ascii-alpha(c) then
-          { temp-buffer := Cons(lower-ascii(c), Nil); cur-name := Cons(lower-ascii(c), Nil); cur-is-end := True; state := SRAWTEXTEndTagName }
+          { temp-buffer := Cons(repl-nul(c), Nil); cur-name := Cons(lower-ascii(c), Nil); cur-is-end := True; state := SRAWTEXTEndTagName }
         else
           { text-acc := Cons('<', text-acc); text-acc := Cons('/', text-acc); reconsume(SRAWTEXT) }
       SRAWTEXTEndTagName ->
         if is-ascii-alnum(c) then
-          { temp-buffer := Cons(lower-ascii(c), temp-buffer); cur-name := Cons(lower-ascii(c), cur-name) }
+          { temp-buffer := Cons(repl-nul(c), temp-buffer); cur-name := Cons(lower-ascii(c), cur-name) }
         elif (is-ws(c) || c == '/' || c == '>') then
           if is-appropriate-end-tag(last-start, temp-buffer) then
             if c == '>' then
-              { emit-token(TokEndTag(string/listchar/string(temp-buffer.reverse))); temp-buffer := Nil; state := SData }
+              { emit-token(TokEndTag(lower-ascii-string(string/listchar/string(temp-buffer.reverse)))); temp-buffer := Nil; state := SData }
             elif c == '/' then
               { pending-endtag-solidus := True; endtag-solidus-saw-non-gt := False; state := SSelfClosingStartTag }
             else
@@ -623,16 +623,16 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
           { text-acc := Cons('<', text-acc); reconsume(SScriptData) }
       SScriptDataEndTagOpen ->
         if is-ascii-alpha(c) then
-          { temp-buffer := Cons(lower-ascii(c), Nil); cur-name := Cons(lower-ascii(c), Nil); cur-is-end := True; state := SScriptDataEndTagName }
+          { temp-buffer := Cons(repl-nul(c), Nil); cur-name := Cons(lower-ascii(c), Nil); cur-is-end := True; state := SScriptDataEndTagName }
         else
           { text-acc := Cons('<', text-acc); text-acc := Cons('/', text-acc); reconsume(SScriptData) }
       SScriptDataEndTagName ->
         if is-ascii-alnum(c) then
-          { temp-buffer := Cons(lower-ascii(c), temp-buffer); cur-name := Cons(lower-ascii(c), cur-name) }
+          { temp-buffer := Cons(repl-nul(c), temp-buffer); cur-name := Cons(lower-ascii(c), cur-name) }
         elif (is-ws(c) || c == '/' || c == '>') then
           if is-appropriate-end-tag(last-start, temp-buffer) then
             if c == '>' then
-              { emit-token(TokEndTag(string/listchar/string(temp-buffer.reverse))); temp-buffer := Nil; state := SData }
+              { emit-token(TokEndTag(lower-ascii-string(string/listchar/string(temp-buffer.reverse)))); temp-buffer := Nil; state := SData }
             elif c == '/' then
               { pending-endtag-solidus := True; endtag-solidus-saw-non-gt := False; state := SSelfClosingStartTag }
             else
@@ -689,16 +689,16 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
           { text-acc := Cons('<', text-acc); reconsume(SScriptDataEscaped) }
       SScriptDataEscapedEndTagOpen ->
         if is-ascii-alpha(c) then
-          { temp-buffer := Cons(lower-ascii(c), Nil); cur-name := Cons(lower-ascii(c), Nil); cur-is-end := True; state := SScriptDataEscapedEndTagName }
+          { temp-buffer := Cons(repl-nul(c), Nil); cur-name := Cons(lower-ascii(c), Nil); cur-is-end := True; state := SScriptDataEscapedEndTagName }
         else
           { text-acc := Cons('<', text-acc); text-acc := Cons('/', text-acc); reconsume(SScriptDataEscaped) }
       SScriptDataEscapedEndTagName ->
         if is-ascii-alnum(c) then
-          { temp-buffer := Cons(lower-ascii(c), temp-buffer); cur-name := Cons(lower-ascii(c), cur-name) }
+          { temp-buffer := Cons(repl-nul(c), temp-buffer); cur-name := Cons(lower-ascii(c), cur-name) }
         elif (is-ws(c) || c == '/' || c == '>') then
           if is-appropriate-end-tag(last-start, temp-buffer) then
             if c == '>' then
-              { emit-token(TokEndTag(string/listchar/string(temp-buffer.reverse))); temp-buffer := Nil; state := SData }
+              { emit-token(TokEndTag(lower-ascii-string(string/listchar/string(temp-buffer.reverse)))); temp-buffer := Nil; state := SData }
             elif c == '/' then
               { pending-endtag-solidus := True; endtag-solidus-saw-non-gt := False; state := SSelfClosingStartTag }
             else
