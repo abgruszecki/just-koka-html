@@ -36,6 +36,7 @@ type mode {
   InRow
   InCell
   AfterBody
+  AfterAfterBody
 }
 
 type fmtentry {
@@ -2006,7 +2007,11 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
               }
           TokEndTag(name) ->
             if name == "html" then
-              (st0, False)
+              {
+                // Close <html> and switch to "after after body" so trailing comments become document children.
+                val st1 = end-tag(st0, "html")
+                (st(st1.stack, AfterAfterBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False)
+              }
             elif name == "br" then
               {
                 // html5lib expects `</br>` after </body> to be a parse error and to insert `<br>` into the body.
@@ -2025,6 +2030,18 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
               val st1 = add-error(st0)
               (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True)
             }
+      AfterAfterBody ->
+        match t
+          TokComment(data) -> (append(st0, TComment(data)), False)
+          TokEOF -> (st0, False)
+          TokCharacter(s) ->
+            if is-ws(s) then
+              // Process whitespace using InBody rules but stay in AfterAfterBody.
+              { val (st1, _rep) = process-inbody(t, st0); (st(st1.stack, AfterAfterBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False) }
+            else
+              { val st1 = add-error(st0); (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True) }
+          _ ->
+            { val st1 = add-error(st0); (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True) }
 
   fun process(ts: list<token>, st0: dstate) : <div,exn> dstate
     match ts
