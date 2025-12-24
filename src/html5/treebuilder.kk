@@ -603,6 +603,46 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
       st(pop-to(st0.stack, name), st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors)
     else st0
 
+  fun is-implied-end-tag(name0: string) : <div,exn> bool
+    val name = lower-ascii-string(name0)
+    match name
+      "dd" -> True
+      "dt" -> True
+      "li" -> True
+      "optgroup" -> True
+      "option" -> True
+      "p" -> True
+      "rb" -> True
+      "rp" -> True
+      "rt" -> True
+      "rtc" -> True
+      "tbody" -> True
+      "td" -> True
+      "tfoot" -> True
+      "th" -> True
+      "thead" -> True
+      "tr" -> True
+      _ -> False
+
+  fun generate-implied-end-tags(st0: dstate, exceptName0: string) : <div,exn> dstate
+    {
+      val exceptName = lower-ascii-string(exceptName0)
+      fun go(stx: dstate) : <div,exn> dstate
+        match stx.stack
+          Cons(fr, _) ->
+            match fr.kind
+              FEl(nm, _ns, _attrs) ->
+                if is-implied-end-tag(nm) && lower-ascii-string(nm) != exceptName then
+                  {
+                    val stack1 = pop-to(stx.stack, nm)
+                    go(st(stack1, stx.imode, stx.html-inserted, stx.head-inserted, stx.body-inserted, stx.errors))
+                  }
+                else stx
+              _ -> stx
+          _ -> stx
+      go(st0)
+    }
+
   fun is-eof-allowed(name: string) : bool
     match name
       "dd" -> True
@@ -1468,7 +1508,13 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
               }
           TokEndTag(name) ->
             if name == "body" then
-              { val st1 = end-tag(st0, "body"); (st(st1.stack, AfterBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False) }
+              {
+                val st0i = generate-implied-end-tags(st0, "")
+                val (curName, _curNs) = current-element(st0i.stack)
+                val stx = if lower-ascii-string(curName) == "body" then st0i else add-error(st0i)
+                val st1 = end-tag(stx, "body")
+                (st(st1.stack, AfterBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False)
+              }
             elif name == "html" then (st0, False)
             elif name == "br" then
               (start-tag(add-error(st0), "br", Nil, True), False)
