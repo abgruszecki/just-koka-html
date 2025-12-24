@@ -1631,7 +1631,13 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
                 val st1 = end-tag(stx, "body")
                 (st(st1.stack, AfterBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False)
               }
-            elif name == "html" then (st0, False)
+            elif name == "html" then
+              if top-is-doc(st0.stack) then
+                // After the <html> element has already been closed, a stray </html> should transition
+                // back to AfterAfterBody so trailing comments can attach to the document.
+                (st(st0.stack, AfterAfterBody, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors), False)
+              else
+                (st0, False)
             elif name == "br" then
               (start-tag(add-error(st0), "br", Nil, True), False)
             elif name == "template" && in-template-content(st0.stack) then
