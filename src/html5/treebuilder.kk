@@ -1698,12 +1698,19 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
               val st0x = stForeign
               if name == "body" then
                 {
-                  // Per spec/html5lib: do not pop <body> here; just switch modes.
-                  val st0i = generate-implied-end-tags(st0x, "")
-                  val (curName1, _curNs) = current-element(st0i.stack)
-                  val stx = if lower-ascii-string(curName1) == "body" then st0i else add-error(st0i)
-                  val st1 = end-tag(stx, "body")
-                  (st(st1.stack, AfterBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False)
+                  // After the <html>/<body> elements have already been closed into the document,
+                  // html5lib expects stray </body> to be ignored without counting an extra error.
+                  if top-is-doc(st0x.stack) then
+                    (st(st0x.stack, AfterAfterBody, st0x.html-inserted, st0x.head-inserted, st0x.body-inserted, st0x.errors), False)
+                  else
+                    {
+                      // Per spec/html5lib: do not pop <body> here; just switch modes.
+                      val st0i = generate-implied-end-tags(st0x, "")
+                      val (curName1, _curNs) = current-element(st0i.stack)
+                      val stx = if lower-ascii-string(curName1) == "body" then st0i else add-error(st0i)
+                      val st1 = end-tag(stx, "body")
+                      (st(st1.stack, AfterBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False)
+                    }
                 }
               elif name == "html" then
                 if top-is-doc(st0x.stack) then
@@ -2199,6 +2206,12 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
       AfterAfterBody ->
         match t
           TokComment(data) -> (append(st0, TComment(data)), False)
+          TokEndTag(name) ->
+            if name == "html" || name == "body" then
+              // html5lib's webkit fixtures expect these stray end tags to be ignored here.
+              (st0, False)
+            else
+              { val st1 = add-error(st0); (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True) }
           TokEOF -> (st0, False)
           TokCharacter(s) ->
             if is-ws(s) then
