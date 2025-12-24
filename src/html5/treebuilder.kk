@@ -483,6 +483,50 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
       Just(stack1) -> st(stack1, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors)
       Nothing -> append(st0, child)
 
+  fun append-into-body(st0: dstate, child: tnode) : <div,exn> dstate
+    // When `<body>` has been popped from the stack (e.g. in AfterBody mode), html5lib still expects
+    // certain tokens to be inserted into the existing `<body>` node.
+    fun add-to-body-node(n: tnode) : <div,exn> maybe<tnode>
+      match n
+        TEl(name, ns, attrs, kids) ->
+          if is-html-ns(ns) && lower-ascii-string(name) == "body" then
+            Just(TEl(name, ns, attrs, kids ++ Cons(child, Nil)))
+          else Nothing
+        _ -> Nothing
+
+    fun add-to-html-frame(fr: frame) : <div,exn> maybe<frame>
+      match fr.kind
+        FEl(nm, ns, _attrs) ->
+          if is-html-ns(ns) && lower-ascii-string(nm) == "html" then
+            {
+              fun go(xs: list<tnode>, acc: list<tnode>) : <div,exn> (found: bool, out: list<tnode>)
+                match xs
+                  Nil -> (False, acc)
+                  Cons(n, rest) ->
+                    match add-to-body-node(n)
+                      Just(n2) -> (True, acc ++ Cons(n2, rest))
+                      Nothing -> go(rest, acc ++ Cons(n, Nil))
+              val (found, kids2) = go(fr.children, Nil)
+              if found then Just(Frame(fr.kind, kids2)) else Nothing
+            }
+          else Nothing
+        _ -> Nothing
+
+    fun go(stack0: list<frame>) : <div,exn> maybe<list<frame>>
+      match stack0
+        Nil -> Nothing
+        Cons(fr, rest) ->
+          match add-to-html-frame(fr)
+            Just(fr2) -> Just(Cons(fr2, rest))
+            Nothing ->
+              match go(rest)
+                Just(tail) -> Just(Cons(fr, tail))
+                Nothing -> Nothing
+
+    match go(st0.stack)
+      Just(stack1) -> st(stack1, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors)
+      Nothing -> append(st0, child)
+
   fun push-el(st0: dstate, name: string, ns: namespace, attrs: list<attr>) : dstate
     st(Cons(Frame(FEl(name, ns, attrs), Nil), st0.stack), st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors)
 
@@ -1482,6 +1526,23 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
                 val st1 = merge-body-attrs(add-error(st0), attrs)
                 (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False)
               }
+            elif name == "rp" || name == "rt" then
+              {
+                // Ruby annotations: generate implied end tags (excluding "rtc") before inserting <rp>/<rt>.
+                val st1 = generate-implied-end-tags(st0, "rtc")
+                (start-tag(st1, name, attrs, selfClosing), False)
+              }
+            elif name == "rb" || name == "rtc" then
+              {
+                // If we are already in ruby annotation content, close implied tags first.
+                val (curName, _curNs) = current-element(st0.stack)
+                val curLow = lower-ascii-string(curName)
+                val st1 =
+                  if curLow == "rb" || curLow == "rp" || curLow == "rt" || curLow == "rtc" then
+                    generate-implied-end-tags(st0, "")
+                  else st0
+                (start-tag(st1, name, attrs, selfClosing), False)
+              }
             elif name == "frame" then
               // Disallow <frame> in the body; ignore it.
               (add-error(st0), False)
@@ -1509,6 +1570,7 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
           TokEndTag(name) ->
             if name == "body" then
               {
+                // Per spec/html5lib: do not pop <body> here; just switch modes.
                 val st0i = generate-implied-end-tags(st0, "")
                 val (curName, _curNs) = current-element(st0i.stack)
                 val stx = if lower-ascii-string(curName) == "body" then st0i else add-error(st0i)
@@ -1921,11 +1983,48 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
           TokEOF -> (add-eof-error(st0), False)
       AfterBody ->
         match t
-          TokComment(data) -> (append(st0, TComment(data)), False)
+          TokComment(data) ->
+            // Spec: comment after body is appended to <html>, not <body>.
+            (append(st0, TComment(data)), False)
           TokCharacter(s) ->
-            if is-ws(s) then (st0, False) else (st(st0.stack, InBody, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors), True)
+            if is-ws(s) then
+              // Spec: whitespace after body is inserted using InBody rules but we stay in AfterBody.
+              (append-into-body(st0, TText(s)), False)
+            else
+              {
+                val st1 = add-error(st0)
+                (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True)
+              }
           TokEOF -> (st0, False)
-          _ -> (st(st0.stack, InBody, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors), True)
+          TokStartTag(name, _attrs, _selfClosing) ->
+            if name == "html" then
+              (st(st0.stack, InBody, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors), True)
+            else
+              {
+                val st1 = add-error(st0)
+                (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True)
+              }
+          TokEndTag(name) ->
+            if name == "html" then
+              (st0, False)
+            elif name == "br" then
+              {
+                // html5lib expects `</br>` after </body> to be a parse error and to insert `<br>` into the body.
+                val st1 = add-error(st0)     // unexpected-token-after-body
+                val st2 = add-error(st1)     // unexpected-end-tag for </br>
+                val st3 = append-into-body(st2, TEl("br", Html, Nil, Nil))
+                (st3, False)
+              }
+            else
+              {
+                val st1 = add-error(st0)
+                (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True)
+              }
+          _ ->
+            {
+              val st1 = add-error(st0)
+              (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True)
+            }
 
   fun process(ts: list<token>, st0: dstate) : <div,exn> dstate
     match ts
