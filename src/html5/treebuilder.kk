@@ -1654,18 +1654,18 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
               fun close-select-for-hr(stx: dstate, nextName0: string) : <div,exn> dstate
                 {
                   val nextName = lower-ascii-string(nextName0)
-                  if nextName != "hr" || !has-open(stx.stack, "select") then stx
+                  if !has-open(stx.stack, "select") then stx
                   else
                     {
                       val (curName0, _curNs) = current-element(stx.stack)
                       val curName = lower-ascii-string(curName0)
                       val st1 =
-                        if curName == "option" then
+                        if curName == "option" && (nextName == "hr" || nextName == "option" || nextName == "optgroup") then
                           st(pop-to(stx.stack, "option"), stx.imode, stx.html-inserted, stx.head-inserted, stx.body-inserted, stx.errors)
                         else stx
                       val (curName1, _curNs1) = current-element(st1.stack)
                       val cur2 = lower-ascii-string(curName1)
-                      if cur2 == "optgroup" then
+                      if cur2 == "optgroup" && (nextName == "hr" || nextName == "optgroup") then
                         st(pop-to(st1.stack, "optgroup"), st1.imode, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors)
                       else st1
                     }
