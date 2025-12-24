@@ -1642,7 +1642,13 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
                 {
                   // Ruby annotations: generate implied end tags (excluding "rtc") before inserting <rp>/<rt>.
                   val st1 = generate-implied-end-tags(stx, "rtc")
-                  (start-tag(st1, name, attrs, selfClosing), False)
+                  // Per spec/html5lib webkit fixtures: inserting <rp>/<rt> when the current node isn't <ruby>
+                  // is a parse error, but we still insert the element.
+                  val (curName, _curNs) = current-element(st1.stack)
+                  val curLow = lower-ascii-string(curName)
+                  val ok = (curLow == "ruby" || curLow == "rtc" || curLow == "rb" || curLow == "rp" || curLow == "rt")
+                  val st2 = if ok then st1 else add-error(st1)
+                  (start-tag(st2, name, attrs, selfClosing), False)
                 }
               elif name == "rb" || name == "rtc" then
                 {
