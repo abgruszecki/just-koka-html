@@ -1906,7 +1906,11 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
           TokComment(data) -> (append(st0, TComment(data)), False)
           TokEndTag(name) ->
             if name == "html" then (st0, False) else (add-error(st0), False)
-          TokStartTag(_) -> (add-error(st0), False)
+          TokStartTag(name, attrs, _) ->
+            if name == "html" then
+              (merge-html-attrs(add-error(st0), attrs), False)
+            else
+              (add-error(st0), False)
           TokDoctype(_,_,_,_) -> (add-error(st0), False)
           TokEOF -> (add-eof-error(st0), False)
       InTable ->
