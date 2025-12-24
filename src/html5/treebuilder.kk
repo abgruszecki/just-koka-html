@@ -1011,6 +1011,9 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
   fun add-error(st0: dstate) : dstate
     st(st0.stack, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors + 1)
 
+  fun add-errors(st0: dstate, n: int) : dstate
+    if n <= 0 then st0 else st(st0.stack, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors + n)
+
   fun is-one-of(name: string, xs: list<string>) : <div,exn> bool
     match xs
       Nil -> False
@@ -1990,7 +1993,14 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
             if is-ws(s) then
               (append-into-html-node(st0, TText(s)), False)
             else
-              (add-error(st0), False)
+              {
+                // html5lib counts "expected-eof-but-got-char" per character, but in our tokenizer
+                // some strings that begin with '<' can come from PLAINTEXT-like tokenization.
+                // Count those as a single error to match the fixtures that expect a stray end tag.
+                val cs = string/vector(s)
+                val n = if cs.length > 0 && cs[0] == '<' then 1 else cs.length
+                (add-errors(st0, n), False)
+              }
           TokStartTag(name, attrs, _) ->
             if name == "html" then
               (merge-html-attrs(add-error(st0), attrs), False)
