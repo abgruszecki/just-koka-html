@@ -727,10 +727,36 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
     }
 
   fun end-tag(st0: dstate, name: string) : <div,exn> dstate
+    // html5lib tree-construction fixtures count parse errors in some cases where
+    // an end tag implicitly closes a <template> (and its template-content frame).
+    fun crosses-template(stack0: list<frame>, target0: string) : <div,exn> bool
+      val target = lower-ascii-string(target0)
+      fun go(xs: list<frame>, sawTemplate: bool) : <div,exn> bool
+        match xs
+          Nil -> False
+          Cons(fr, rest) ->
+            match fr.kind
+              FTemplateContent -> go(rest, True)
+              FEl(nm, _ns, _attrs) ->
+                {
+                  val nm1 = lower-ascii-string(nm)
+                  if nm1 == target then sawTemplate
+                  elif nm1 == "template" then go(rest, True)
+                  else go(rest, sawTemplate)
+                }
+              _ -> go(rest, sawTemplate)
+      go(stack0, False)
+
     if lower-ascii-string(name) == "template" then
       st(pop-template-stack(st0.stack), st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors)
     elif has-open(st0.stack, name) then
-      st(pop-to(st0.stack, name), st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors)
+      {
+        val st1 =
+          if crosses-template(st0.stack, name) then
+            st(st0.stack, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors + 1)
+          else st0
+        st(pop-to(st1.stack, name), st1.imode, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors)
+      }
     else st0
 
   fun is-implied-end-tag(name0: string) : <div,exn> bool
@@ -2092,6 +2118,7 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
               (start-tag(st0, name, attrs, selfClosing), False)
             else
               {
+                // In table contexts, most non-table start tags trigger foster parenting and count as a parse error.
                 val st1 = if foster-needed(st0.stack) then add-error(st0) else st0
                 (start-tag(st1, name, attrs, selfClosing), False)
               }
@@ -2100,7 +2127,38 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
               if has-open(st0.stack, name) then
                 { val st1 = end-tag(st0, name); (update-mode(st1), False) }
               else
-                (st(st0.stack, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors + 1), False)
+                {
+                  fun is-tableish(tag: string) : bool
+                    tag == "table"
+                    || tag == "caption"
+                    || tag == "title"
+                    || tag == "col"
+                    || tag == "colgroup"
+                    || tag == "style"
+                    || tag == "script"
+                    || tag == "tr"
+                    || is-table-section(tag)
+                    || is-table-cell(tag)
+
+                  // For non-table end tags in a table context, html5lib counts a table-mode error and
+                  // (for foster-parenting "table voodoo"), and if the end tag is still unexpected it
+                  // counts an additional "unexpected end tag" error.
+                  if is-tableish(name) then
+                    (st(st0.stack, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors + 1), False)
+                  elif has-open(st0.stack, name) then
+                    {
+                      // For foreign content (SVG/MathML), don't charge an extra table-mode error when closing
+                      // the matching open element.
+                      val st1 =
+                        match open-element-ns(st0.stack, name)
+                          Just(nsFound) -> if is-html-ns(nsFound) then add-error(st0) else st0
+                          _ -> add-error(st0)
+                      val st2 = end-tag(st1, name)
+                      (update-mode(st2), False)
+                    }
+                  else
+                    (add-errors(st0, 2), False)
+                }
             elif name == "html" || name == "body" then
               // Don't allow these end tags to close the actual <html>/<body> element from inside table modes.
               (add-error(st0), False)
@@ -2124,17 +2182,49 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
               else
                 { val st1 = end-tag(st0, "table"); (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False) }
             else
-              if has-open(st0.stack, name) then
-                if is-formatting-element(name) then
-                  if has-in-scope(st0.stack, name) then
-                    { val st1 = adoption-end-tag(st0, name); (update-mode(st1), False) }
+              {
+                fun is-tableish(tag: string) : bool
+                  tag == "table"
+                  || tag == "caption"
+                  || tag == "title"
+                  || tag == "col"
+                  || tag == "colgroup"
+                  || tag == "style"
+                  || tag == "script"
+                  || tag == "tr"
+                  || is-table-section(tag)
+                  || is-table-cell(tag)
+
+                if has-open(st0.stack, name) then
+                  if is-formatting-element(name) then
+                    if has-in-scope(st0.stack, name) then
+                      { val st1 = adoption-end-tag(st0, name); (update-mode(st1), False) }
+                    else
+                      // html5lib counts 2 errors here ("unexpected-end-tag-implies-table-voodoo" + "unexpected-end-tag").
+                      (st(st0.stack, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors + 2), False)
                   else
-                    // html5lib counts 2 errors here ("unexpected-end-tag-implies-table-voodoo" + "unexpected-end-tag").
-                    (st(st0.stack, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors + 2), False)
+                    if is-tableish(name) then
+                      // Table-scoped end tags that match an open element are handled normally.
+                      { val st1 = end-tag(st0, name); (update-mode(st1), False) }
+                    else
+                      // Non-table end tags in a table context are parse errors even if they match an open element.
+                      {
+                        val inCaption = has-open(st0.stack, "caption")
+                        val st1 =
+                          match open-element-ns(st0.stack, name)
+                            Just(nsFound) -> if !inCaption && is-html-ns(nsFound) then add-error(st0) else st0
+                            _ -> if inCaption then st0 else add-error(st0)
+                        val st2 = end-tag(st1, name)
+                        (update-mode(st2), False)
+                      }
                 else
-                  { val st1 = end-tag(st0, name); (update-mode(st1), False) }
-              else
-                (st(st0.stack, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors + 1), False)
+                  if is-tableish(name) then
+                    // Table-scoped end tags that don't match an open element are a single parse error.
+                    (add-error(st0), False)
+                  else
+                    // "Table voodoo" + "unexpected end tag".
+                    (add-errors(st0, 2), False)
+              }
           TokCharacter(s) ->
             if in-template-content(st0.stack) then
               (append(st0, TText(s)), False)

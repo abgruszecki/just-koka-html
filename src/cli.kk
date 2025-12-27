@@ -11,6 +11,7 @@ import html5
 import html5/json
 import html5/base64
 import html5/tokenizer
+import html5/treebuilder
 import html5/dom
 
 fun state-from-arg(s: string) : tokenizer/tokenizer-state
@@ -194,6 +195,46 @@ fun run-tree-batch() : <console,div,exn> ()
 
   json/arr(go(0, Nil)).println
 
+fun saw-leading-doctype(ts: list<tokenizer/token>) : <div,exn> bool
+  fun is-ws-only(s: string) : <div,exn> bool
+    val cs = string/vector(s)
+    var ok := True
+    var i := 0
+    while(fn(){ ok && i < cs.length }, fn(){
+      val c = cs[i]
+      ok := (c == ' ' || c == '\n' || c == '\t' || c == '\r' || c == '\u000c')
+      i := i + 1
+    })
+    ok
+
+  match ts
+    Nil -> False
+    Cons(t, rest) ->
+      match t
+        TokDoctype(_,_,_,_) -> True
+        TokComment(_) -> saw-leading-doctype(rest)
+        TokCharacter(s) -> if is-ws-only(s) then saw-leading-doctype(rest) else False
+        _ -> False
+
+fun run-tree-debug(args: list<string>) : <console,fsys,div,exn> ()
+  // args: tree-debug <inputPath> [script(on|off)]
+  val pathStr = args.drop(1).head("")
+  val scriptArg = args.drop(2).head("on")
+  val input = read-text-file(path(pathStr))
+  val scripting = (scriptArg != "off")
+  val (tokens, tokErrors) = tokenizer/tokenize-for-parse(input, Data, Nothing, scripting)
+  val (dom0, treeErrCount) = treebuilder/build-document(tokens, scripting)
+  val missing = if saw-leading-doctype(tokens) then 0 else 1
+  val out =
+    json/obj([
+      ("tokenizer_errors", int/show(tokErrors.length)),
+      ("treebuilder_errors", int/show(treeErrCount)),
+      ("missing_doctype_injected", int/show(missing)),
+      ("total_errors", int/show(tokErrors.length + treeErrCount + missing)),
+      ("tree", json/escape-string(html5/to-test-format(dom0))),
+    ])
+  out.println
+
 pub fun main()
   val args = get-args()
   match args
@@ -203,5 +244,6 @@ pub fun main()
         "tokenizer-batch" -> run-tokenizer-batch(False)
         "tokenizer-batch-xml" -> run-tokenizer-batch(True)
         "tree-batch" -> run-tree-batch()
+        "tree-debug" -> run-tree-debug(Cons(cmd, rest))
         _ -> "usage: cli tokenizer <state> <lastStartTagOr-> <inputPath> | cli tokenizer-batch | cli tree-batch".println
     _ -> "usage: cli tokenizer <state> <lastStartTagOr-> <inputPath> | cli tokenizer-batch | cli tree-batch".println
