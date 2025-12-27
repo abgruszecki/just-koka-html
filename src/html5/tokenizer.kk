@@ -527,33 +527,55 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
     tag-next-state := SData
     endtag-attr-error-emitted := False
     endtag-solidus-saw-non-gt := False
-    if (!cur-is-end && autoSwitch && cur-autoswitch-ok() && !cur-selfclosing) then
-      match name
-        "textarea" -> { last-start := Just(name); tag-next-state := SRCDATA }
-        "title" -> { last-start := Just(name); tag-next-state := SRCDATA }
-        "style" -> { last-start := Just(name); tag-next-state := SRAWTEXT }
-        "xmp" -> { last-start := Just(name); tag-next-state := SRAWTEXT }
-        "iframe" -> { last-start := Just(name); tag-next-state := SRAWTEXT }
-        "noembed" -> { last-start := Just(name); tag-next-state := SRAWTEXT }
-        "noframes" -> { last-start := Just(name); tag-next-state := SRAWTEXT }
-        "noscript" -> if scriptingEnabled then { last-start := Just(name); tag-next-state := SRAWTEXT } else ()
-        "script" -> { last-start := Just(name); tag-next-state := SScriptData }
-        "plaintext" -> { last-start := Just(name); tag-next-state := SPlaintext }
-        _ -> ()
-    if cur-is-end then
-      emit-token(TokEndTag(name))
+    // If we are in the middle of a DOCTYPE (as a markup declaration) and we
+    // somehow ended up trying to emit an empty start tag, prefer emitting the
+    // DOCTYPE instead (prevents bogus `<>` elements in tree-construction tests).
+    if name == "" && doctype-open then
+      {
+        val dt-name = string/listchar/string(doctype-name.reverse).trim
+        emit-token(TokDoctype(dt-name, doctype-public, doctype-system, doctype-force))
+        doctype-open := False
+        doctype-name := Nil
+        doctype-public := Nothing
+        doctype-system := Nothing
+        doctype-force := False
+        doctype-id-acc := Nil
+        doctype-saw-ws := False
+        doctype-trailing-ws := False
+        cur-is-end := False
+        cur-name := Nil
+        cur-attrs := Nil
+        cur-selfclosing := False
+        pending-endtag-solidus := False
+      }
     else
-      emit-token(TokStartTag(name, cur-attrs.reverse, cur-selfclosing))
-    // Update the minimal context stack (used for deciding whether auto-switch is allowed).
-    if cur-is-end then
-      pop-ctx(name)
-    else
-      if !cur-selfclosing then push-ctx(name) else ()
-    cur-is-end := False
-    cur-name := Nil
-    cur-attrs := Nil
-    cur-selfclosing := False
-    pending-endtag-solidus := False
+      if (!cur-is-end && autoSwitch && cur-autoswitch-ok() && !cur-selfclosing) then
+        match name
+          "textarea" -> { last-start := Just(name); tag-next-state := SRCDATA }
+          "title" -> { last-start := Just(name); tag-next-state := SRCDATA }
+          "style" -> { last-start := Just(name); tag-next-state := SRAWTEXT }
+          "xmp" -> { last-start := Just(name); tag-next-state := SRAWTEXT }
+          "iframe" -> { last-start := Just(name); tag-next-state := SRAWTEXT }
+          "noembed" -> { last-start := Just(name); tag-next-state := SRAWTEXT }
+          "noframes" -> { last-start := Just(name); tag-next-state := SRAWTEXT }
+          "noscript" -> if scriptingEnabled then { last-start := Just(name); tag-next-state := SRAWTEXT } else ()
+          "script" -> { last-start := Just(name); tag-next-state := SScriptData }
+          "plaintext" -> { last-start := Just(name); tag-next-state := SPlaintext }
+          _ -> ()
+      if cur-is-end then
+        emit-token(TokEndTag(name))
+      else
+        emit-token(TokStartTag(name, cur-attrs.reverse, cur-selfclosing))
+      // Update the minimal context stack (used for deciding whether auto-switch is allowed).
+      if cur-is-end then
+        pop-ctx(name)
+      else
+        if !cur-selfclosing then push-ctx(name) else ()
+      cur-is-end := False
+      cur-name := Nil
+      cur-attrs := Nil
+      cur-selfclosing := False
+      pending-endtag-solidus := False
 
   fun is-appropriate-end-tag(ls: maybe<string>, tmp: list<char>) : <div,exn> bool
     match ls
@@ -1045,6 +1067,9 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
             // Enter bogus DOCTYPE state. As an optimization (and to avoid
             // accidentally interpreting bogus-doctype contents as markup), skip
             // directly to the next '>' when present.
+            // html5lib counts both a legacy and a modern error here.
+            add-err("invalid-character-sequence-after-doctype-name", i)
+            add-err("invalid-character-sequence-after-doctype-name", i)
             doctype-force := True
             val gt = find-next-gt(i)
             if gt >= 0 then
@@ -1060,7 +1085,14 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
         elif c == '\'' then
           { doctype-id-acc := Nil; state := SDoctypePublicIdSQ }
         elif c == '>' then
-          { doctype-force := True; emit-doctype(); state := SData }
+          {
+            // html5lib counts both a legacy and a modern error here.
+            add-err("missing-doctype-public-identifier", i)
+            add-err("missing-doctype-public-identifier", i)
+            doctype-force := True
+            emit-doctype()
+            state := SData
+          }
         else
           { doctype-force := True; state := SBogusDoctype }
       SBeforeDoctypePublicId ->
@@ -1071,7 +1103,14 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
         elif c == '\'' then
           { doctype-id-acc := Nil; state := SDoctypePublicIdSQ }
         elif c == '>' then
-          { doctype-force := True; emit-doctype(); state := SData }
+          {
+            // html5lib counts both a legacy and a modern error here.
+            add-err("missing-doctype-public-identifier", i)
+            add-err("missing-doctype-public-identifier", i)
+            doctype-force := True
+            emit-doctype()
+            state := SData
+          }
         else
           { doctype-force := True; state := SBogusDoctype }
       SDoctypePublicIdDQ ->
@@ -1118,7 +1157,14 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
         elif c == '\'' then
           { doctype-id-acc := Nil; state := SDoctypeSystemIdSQ }
         elif c == '>' then
-          { doctype-force := True; emit-doctype(); state := SData }
+          {
+            // html5lib counts both a legacy and a modern error here.
+            add-err("missing-doctype-system-identifier", i)
+            add-err("missing-doctype-system-identifier", i)
+            doctype-force := True
+            emit-doctype()
+            state := SData
+          }
         else
           { doctype-force := True; state := SBogusDoctype }
       SBeforeDoctypeSystemId ->
@@ -1129,7 +1175,14 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
         elif c == '\'' then
           { doctype-id-acc := Nil; state := SDoctypeSystemIdSQ }
         elif c == '>' then
-          { doctype-force := True; emit-doctype(); state := SData }
+          {
+            // html5lib counts both a legacy and a modern error here.
+            add-err("missing-doctype-system-identifier", i)
+            add-err("missing-doctype-system-identifier", i)
+            doctype-force := True
+            emit-doctype()
+            state := SData
+          }
         else
           { doctype-force := True; state := SBogusDoctype }
       SDoctypeSystemIdDQ ->
