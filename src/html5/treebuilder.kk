@@ -260,31 +260,66 @@ fun is-math-text-integration-point(name: string) : bool
 
 fun is-svg-html-integration-point(name: string) : bool
   // https://html.spec.whatwg.org/multipage/parsing.html#html-integration-point
-  name == "foreignObject" || name == "desc" || name == "title"
+  // Caller may pass either the raw token name, an adjusted SVG name, or a lowercased name.
+  name == "foreignObject" || name == "foreignobject" || name == "desc" || name == "title"
 
-fun current-element(stack0: list<frame>) : <div> (name: string, ns: namespace)
+fun current-element(stack0: list<frame>) : <div> (name: string, ns: namespace, attrs: list<attr>)
   match stack0
-    Nil -> ("", Html)
+    Nil -> ("", Html, Nil)
     Cons(fr, rest) ->
       match fr.kind
-        FEl(name, ns, _) -> (name, ns)
+        FEl(name, ns, attrs) -> (name, ns, attrs)
         FFrag(mctx) ->
           match mctx
-            Just(Fragmentcontext(tag, ns)) -> (tag, ns)
+            Just(Fragmentcontext(tag, ns)) -> (tag, ns, Nil)
             _ -> current-element(rest)
         _ -> current-element(rest)
 
-fun element-ns(stack0: list<frame>, name: string) : <div> namespace
-  val (parentName, parentNs) = current-element(stack0)
+fun ascii-lower-string(s0: string) : <div,exn> string
+  lower-ascii-string(s0.trim)
+
+fun attr-has-encoding-html(attrs: list<attr>) : <div,exn> bool
+  fun go(xs: list<attr>) : <div,exn> bool
+    match xs
+      Nil -> False
+      Cons(Attr(name, value), rest) ->
+        match name
+          Attrname(_, local) ->
+            if local == "encoding" then
+              {
+                val v = ascii-lower-string(value)
+                (v == "text/html" || v == "application/xhtml+xml")
+              }
+            else go(rest)
+  go(attrs)
+
+fun is-math-html-integration-point(name0: string, attrs: list<attr>) : <div,exn> bool
+  // MathML HTML integration point: annotation-xml with encoding="text/html" or "application/xhtml+xml"
+  // https://html.spec.whatwg.org/multipage/parsing.html#html-integration-point
+  val name = ascii-lower-string(name0)
+  name == "annotation-xml" && attr-has-encoding-html(attrs)
+
+fun is-integration-point(ns: namespace, name0: string, attrs: list<attr>) : <div,exn> bool
+  match ns
+    Svg -> is-svg-html-integration-point(name0)
+    Math -> is-math-text-integration-point(ascii-lower-string(name0)) || is-math-html-integration-point(name0, attrs)
+    _ -> False
+
+fun element-ns(stack0: list<frame>, name0: string) : <div,exn> namespace
+  val name = ascii-lower-string(name0)
+  val (parentName0, parentNs, parentAttrs) = current-element(stack0)
+  val parentName = ascii-lower-string(parentName0)
   match parentNs
     Html ->
       if name == "svg" then Svg
       elif name == "math" then Math
       else Html
     Svg ->
-      if is-svg-html-integration-point(parentName) then Html else Svg
+      if name == "math" then Math
+      elif is-integration-point(Svg, parentName, parentAttrs) then Html else Svg
     Math ->
-      if is-math-text-integration-point(parentName) then Html else Math
+      if name == "svg" then Svg
+      elif is-integration-point(Math, parentName, parentAttrs) then Html else Math
 
 fun adjust-tag-name(ns: namespace, name: string) : string
   match ns
@@ -774,7 +809,7 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
   fun start-tag(st0: dstate, rawName: string, attrs: list<attr>, selfClosing: bool) : <div,exn> dstate
     {
       val rawLower = lower-ascii-string(rawName)
-      val (curName, curNs) = current-element(st0.stack)
+      val (curName, curNs, _curAttrs) = current-element(st0.stack)
 
       fun is-integration-point(ns: namespace, name: string) : bool
         match ns
@@ -1044,6 +1079,7 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
       "h6" -> True
       "xmp" -> True
       _ -> False
+
 
   fun is-scope-boundary(name0: string, ns: namespace) : <div,exn> bool
     if !is-html-ns(ns) then True
@@ -1413,7 +1449,7 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
     // - wrap each intervening special element's already-inserted children in a cloned formatting element
     // - close the original formatting element into its parent, and keep intervening elements open
     val want = lower-ascii-string(tag)
-    val (curName0, _curNs) = current-element(st0.stack)
+    val (curName0, _curNs, _curAttrs) = current-element(st0.stack)
     if lower-ascii-string(curName0) == want then
       end-tag(st0, tag)
     else
@@ -1606,7 +1642,7 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
           _ -> in-template-content(rest)
 
   fun foster-needed(stack0: list<frame>) : <div,exn> bool
-    val (nm, _) = current-element(stack0)
+    val (nm, _ns, _attrs) = current-element(stack0)
     val name = lower-ascii-string(nm)
     name == "table" || name == "tbody" || name == "thead" || name == "tfoot" || name == "tr"
 
@@ -1634,7 +1670,7 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
     // and is not an integration point, bypass insertion-mode-specific table/body rules.
     // This is critical for passing svg/math fragment fixtures where table tags appear inside
     // foreign elements.
-    val (curName0, curNs) = current-element(st0.stack)
+    val (curName0, curNs, _curAttrs) = current-element(st0.stack)
     val curName = lower-ascii-string(curName0)
     fun is-integration-point(ns: namespace, name0: string) : <div,exn> bool
       match ns
@@ -1798,7 +1834,7 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
             if in-template-content(st0.stack) then
               (append(st0, TText(s)), False)
             else {
-              val (curName, _curNs) = current-element(st0.stack)
+              val (curName, _curNs, _curAttrs) = current-element(st0.stack)
               val nm = lower-ascii-string(curName)
               if nm == "title" || nm == "style" || nm == "script" || nm == "noframes" || (scriptingEnabled && nm == "noscript") then
                 (append(st0, TText(s)), False)
@@ -1871,7 +1907,7 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
               (append(st0, TText(s)), False)
             else
               {
-                val (curName, _curNs) = current-element(st0.stack)
+                val (curName, _curNs, _curAttrs) = current-element(st0.stack)
                 val nm = lower-ascii-string(curName)
                 if nm == "style" || nm == "noframes" then
                   (append(st0, TText(s)), False)
@@ -1888,7 +1924,7 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
           TokComment(data) -> (append(st0, TComment(data)), False)
           TokCharacter(s) ->
             {
-              val (curName, _curNs) = current-element(st0.stack)
+              val (curName, _curNs, _curAttrs) = current-element(st0.stack)
               val nm = lower-ascii-string(curName)
               if nm == "title" then
                 (append(st0, TText(s)), False)
@@ -1956,13 +1992,13 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
                   if !has-open(stx.stack, "select") then stx
                   else
                     {
-                      val (curName0, _curNs) = current-element(stx.stack)
+                      val (curName0, _curNs, _curAttrs) = current-element(stx.stack)
                       val curName = lower-ascii-string(curName0)
                       val st1 =
                         if curName == "option" && (nextName == "hr" || nextName == "option" || nextName == "optgroup") then
                           st(pop-to(stx.stack, "option"), stx.imode, stx.html-inserted, stx.head-inserted, stx.body-inserted, stx.errors)
                         else stx
-                      val (curName1, _curNs1) = current-element(st1.stack)
+                      val (curName1, _curNs1, _curAttrs1) = current-element(st1.stack)
                       val cur2 = lower-ascii-string(curName1)
                       if cur2 == "optgroup" && (nextName == "hr" || nextName == "optgroup") then
                         st(pop-to(st1.stack, "optgroup"), st1.imode, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors)
@@ -1989,7 +2025,7 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
                   val st1 = generate-implied-end-tags(stx, "rtc")
                   // Per spec/html5lib webkit fixtures: inserting <rp>/<rt> when the current node isn't <ruby>
                   // is a parse error, but we still insert the element.
-                  val (curName, _curNs) = current-element(st1.stack)
+                  val (curName, _curNs, _curAttrs) = current-element(st1.stack)
                   val curLow = lower-ascii-string(curName)
                   val ok = (curLow == "ruby" || curLow == "rtc" || curLow == "rb" || curLow == "rp" || curLow == "rt")
                   val st2 = if ok then st1 else add-error(st1)
@@ -1998,7 +2034,7 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
               elif name == "rb" || name == "rtc" then
                 {
                   // If we are already in ruby annotation content, close implied tags first.
-                  val (curName, _curNs) = current-element(stx.stack)
+                  val (curName, _curNs, _curAttrs) = current-element(stx.stack)
                   val curLow = lower-ascii-string(curName)
                   val st1 =
                     if curLow == "rb" || curLow == "rp" || curLow == "rt" || curLow == "rtc" then
@@ -2047,7 +2083,35 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
                 {
                   val ns = element-ns(stx.stack, name)
                   val adj = adjust-tag-name(ns, name)
-                  val st1 = if is-html-ns(ns) then close-p-if-needed(stx, adj) else stx
+                  val st1 =
+                    if is-html-ns(ns) then
+                      {
+                        // At SVG/MathML HTML integration points (e.g. <foreignObject>), html5lib expects
+                        // `<p><table>` to close the <p> before inserting the table (unlike some quirks fixtures).
+                        fun nearest-foreign-ancestor-integration-point(xs: list<frame>) : <div,exn> bool
+                          match xs
+                            Nil -> False
+                            Cons(fr, rest) ->
+                              match fr.kind
+                                FEl(nm, ns, attrs0) ->
+                                  if is-html-ns(ns) then nearest-foreign-ancestor-integration-point(rest)
+                                  else
+                                    match ns
+                                      Svg -> is-svg-html-integration-point(nm)
+                                      Math -> is-math-text-integration-point(lower-ascii-string(nm)) || is-math-html-integration-point(nm, attrs0)
+                                      _ -> False
+                                _ -> nearest-foreign-ancestor-integration-point(rest)
+
+                        val inIntegration = nearest-foreign-ancestor-integration-point(stx.stack)
+                        val stp =
+                          if adj == "table" && !selfClosing && inIntegration then
+                            if has-in-button-scope(stx.stack, "p") then
+                              st(pop-to(stx.stack, "p"), stx.imode, stx.html-inserted, stx.head-inserted, stx.body-inserted, stx.errors)
+                            else stx
+                          else stx
+                        close-p-if-needed(stp, adj)
+                      }
+                    else stx
                   val st2 = start-tag(st1, name, attrs, selfClosing)
                   if is-html-ns(ns) && adj == "table" && !selfClosing then
                     (st(st2.stack, InTable, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors), False)
@@ -2081,7 +2145,7 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
                   go(Nothing, stack0)
                 }
 
-              val (curName0, curNs) = current-element(st0.stack)
+              val (curName0, curNs, _curAttrs) = current-element(st0.stack)
               val curName = lower-ascii-string(curName0)
               val endName = lower-ascii-string(name)
 
@@ -2127,7 +2191,7 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
                         {
                           // Per spec/html5lib: do not pop <body> here; just switch modes.
                           val st0i = generate-implied-end-tags(st0x, "")
-                          val (curName1, _curNs) = current-element(st0i.stack)
+                          val (curName1, _curNs, _curAttrs) = current-element(st0i.stack)
                           val stx = if lower-ascii-string(curName1) == "body" then st0i else add-error(st0i)
                           (st(stx.stack, AfterBody, stx.html-inserted, stx.head-inserted, stx.body-inserted, stx.errors), False)
                         }
@@ -2156,7 +2220,7 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
                     else
                       {
                         val st0i = generate-implied-end-tags(st0x, "")
-                        val (curName1, _curNs1) = current-element(st0i.stack)
+                        val (curName1, _curNs1, _curAttrs1) = current-element(st0i.stack)
                         val stx = if lower-ascii-string(curName1) == lower-ascii-string(name) then st0i else add-error(st0i)
                         match nearest-heading-in-scope(stx.stack)
                           Just(hname) ->
@@ -2248,7 +2312,7 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
                   go(Nothing, stack0)
                 }
 
-              val (curName0, curNs) = current-element(st0.stack)
+              val (curName0, curNs, _curAttrs) = current-element(st0.stack)
               val curName = lower-ascii-string(curName0)
               val endName = lower-ascii-string(name)
               val contextMatches =
@@ -2588,7 +2652,7 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
               (start-tag(st0, name, attrs, selfClosing), False)
             else
               {
-                val (curNm0, curNs0) = current-element(st0.stack)
+                val (curNm0, curNs0, _curAttrs) = current-element(st0.stack)
                 val inIntegration =
                   match curNs0
                     Svg -> is-svg-html-integration-point(curNm0)
@@ -2652,7 +2716,7 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
                 (st(st0.stack, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors + 1), False)
             elif name == "table" then
               {
-                val (curNm0, curNs0) = current-element(st0.stack)
+                val (curNm0, curNs0, _curAttrs) = current-element(st0.stack)
                 val inIntegration =
                   match curNs0
                     Svg -> is-svg-html-integration-point(curNm0)
@@ -2726,7 +2790,7 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
               (start-tag(st0, name, attrs, selfClosing), False)
             else
               {
-                val (curNm0, curNs0) = current-element(st0.stack)
+                val (curNm0, curNs0, _curAttrs) = current-element(st0.stack)
                 val inIntegration =
                   match curNs0
                     Svg -> is-svg-html-integration-point(curNm0)
@@ -2811,7 +2875,7 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
             elif name == "table" then
               {
                 // Close the cell and reprocess. Count a parse error if the current node isn't the cell itself.
-                val (curName, _curNs) = current-element(st0.stack)
+                val (curName, _curNs, _curAttrs) = current-element(st0.stack)
                 val curLow = lower-ascii-string(curName)
                 val stx = if curLow == "td" || curLow == "th" then st0 else add-error(st0)
                 val st1 = close-cell(stx)
@@ -2838,7 +2902,7 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
                 // like the spec: table-mode tokens should be handled as "in body" when there's
                 // no <table> in scope. Our simplified model doesn't track table scope, so we
                 // approximate this with "no open <table>" and ignore common table-structure tags.
-                val (curNm0, curNs0) = current-element(st0.stack)
+                val (curNm0, curNs0, _curAttrs) = current-element(st0.stack)
                 val inIntegration =
                   match curNs0
                     Svg -> is-svg-html-integration-point(curNm0)
@@ -2874,7 +2938,7 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
                   {
                     // Close the current cell and reprocess.
                     // html5lib counts an error here for nested cell start tags, but not for all table-structure tags.
-                    val (curName, _curNs) = current-element(st0.stack)
+                    val (curName, _curNs, _curAttrs) = current-element(st0.stack)
                     val curLow = lower-ascii-string(curName)
                     val st1 = if (name == "td" || name == "th") && curLow != "td" && curLow != "th" then add-error(st0) else st0
                     val st2 = close-cell(st1)
