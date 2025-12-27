@@ -2424,12 +2424,31 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
               }
             elif name == "table" then
               {
-                // Nested <table> start tags in a table context close the current table and reprocess.
-                val st1 = add-error(st0)
-                // If a <select> is open, close it (foster-parented) first so it ends up before the table.
-                val stack1 = if has-open(st1.stack, "select") then pop-to-select-foster(st1.stack) else st1.stack
-                val st2 = end-tag(st(stack1, st1.imode, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), "table")
-                (st(st2.stack, InBody, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors), True)
+                // Fragment parsing in a <table> context: ignore a leading nested <table> start tag.
+                // This matches html5lib's innerHTML fixtures where `<table><tr>` in a "table" fragment
+                // should yield `<tbody><tr>` rather than a new outer <table>.
+                fun is-frag-table-context(stack0: list<frame>) : <div,exn> bool
+                  match stack0
+                    Nil -> False
+                    Cons(fr, rest) ->
+                      match fr.kind
+                        FFrag(Just(Fragmentcontext(tag0, ns0))) ->
+                          is-html-ns(ns0) && lower-ascii-string(tag0.trim) == "table"
+                        _ -> is-frag-table-context(rest)
+
+                val (curName0, curNs0, _curAttrs) = current-element(st0.stack)
+                val curLow = lower-ascii-string(curName0)
+                if is-frag-table-context(st0.stack) && is-html-ns(curNs0) && curLow == "table" then
+                  (add-error(st0), False)
+                else
+                  {
+                    // Nested <table> start tags in a table context close the current table and reprocess.
+                    val st1 = add-error(st0)
+                    // If a <select> is open, close it (foster-parented) first so it ends up before the table.
+                    val stack1 = if has-open(st1.stack, "select") then pop-to-select-foster(st1.stack) else st1.stack
+                    val st2 = end-tag(st(stack1, st1.imode, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), "table")
+                    (st(st2.stack, InBody, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors), True)
+                  }
               }
             elif name == "colgroup" then
               { val st1 = start-tag(st0, name, attrs, selfClosing); (st(st1.stack, InColumnGroup, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False) }
