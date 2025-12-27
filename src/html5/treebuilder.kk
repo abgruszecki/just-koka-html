@@ -83,6 +83,56 @@ fun is-void-element(name: string) : bool
     "wbr" -> True
     _ -> False
 
+fun is-foreign-breakout-element(name: string) : bool
+  // https://html.spec.whatwg.org/multipage/parsing.html#parsing-main-inforeign
+  // We only need the "break out of foreign content" list (tag name already lowercase).
+  match name
+    "b" -> True
+    "big" -> True
+    "blockquote" -> True
+    "body" -> True
+    "br" -> True
+    "center" -> True
+    "code" -> True
+    "dd" -> True
+    "div" -> True
+    "dl" -> True
+    "dt" -> True
+    "em" -> True
+    "embed" -> True
+    "h1" -> True
+    "h2" -> True
+    "h3" -> True
+    "h4" -> True
+    "h5" -> True
+    "h6" -> True
+    "head" -> True
+    "hr" -> True
+    "i" -> True
+    "img" -> True
+    "li" -> True
+    "listing" -> True
+    "menu" -> True
+    "meta" -> True
+    "nobr" -> True
+    "ol" -> True
+    "p" -> True
+    "pre" -> True
+    "ruby" -> True
+    "s" -> True
+    "small" -> True
+    "span" -> True
+    "strong" -> True
+    "strike" -> True
+    "sub" -> True
+    "sup" -> True
+    "table" -> True
+    "tt" -> True
+    "u" -> True
+    "ul" -> True
+    "var" -> True
+    _ -> False
+
 fun lower-ascii(c: char) : char
   if (c >= 'A' && c <= 'Z') then (c.int + 32).char else c
 
@@ -450,9 +500,9 @@ fun build-tree(tokens: list<token>, initial: frame) : <div,exn> (children: list<
       _ -> Nil
   (children, errs)
 
-pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <div,exn> (dom, int)
-  // M2: a minimal insertion-mode document builder.
-  // Goal: reliably synthesize <html><head><body> even when wrappers are missing or partial.
+fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, finalizeDoc: bool) : <div,exn> (list<tnode>, int)
+  // Token -> treebuilder engine (insertion-mode-ish).
+  // `finalizeDoc=true` synthesizes missing <html>/<head>/<body> wrappers and closes <body>.
 
   fun add-child(fr: frame, child: tnode) : frame
     match (child, fr.children)
@@ -709,21 +759,52 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
           _ -> stack1
       _ -> stack1
 
+  fun pop-foreign-elements(stack0: list<frame>) : <div,exn> list<frame>
+    // Pop open foreign-content elements until the current node is in the HTML namespace.
+    match stack0
+      Cons(top, Cons(parent, rest)) ->
+        match top.kind
+          FEl(_nm, ns, _attrs) ->
+            if is-html-ns(ns) then stack0
+            else pop-foreign-elements(Cons(add-child(parent, close-frame(top)), rest))
+          // Don't cross non-element sentinels like template-content.
+          _ -> stack0
+      _ -> stack0
+
   fun start-tag(st0: dstate, rawName: string, attrs: list<attr>, selfClosing: bool) : <div,exn> dstate
     {
-      val ns0 = element-ns(st0.stack, rawName)
+      val rawLower = lower-ascii-string(rawName)
+      val (curName, curNs) = current-element(st0.stack)
+
+      fun is-integration-point(ns: namespace, name: string) : bool
+        match ns
+          Svg -> is-svg-html-integration-point(name)
+          Math -> is-math-text-integration-point(name)
+          _ -> False
+
+      // Foreign-content "breakout" tags (like <nobr>) should break out and be inserted in HTML namespace.
+      val stx =
+        if !is-html-ns(curNs) && !is-integration-point(curNs, curName) && is-foreign-breakout-element(rawLower) then
+          {
+            val st1 = st(st0.stack, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors + 1)
+            val stack1 = pop-foreign-elements(st1.stack)
+            st(stack1, st1.imode, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors)
+          }
+        else st0
+
+      val ns0 = element-ns(stx.stack, rawLower)
       val ns = ns0
-      val name = adjust-tag-name(ns, rawName)
+      val name = adjust-tag-name(ns, rawLower)
       val attrs1 = adjust-attrs(ns, attrs)
       if (is-html-ns(ns) && name == "template" && !selfClosing) then
         {
-          val st1 = push-el(st0, "template", Html, attrs1)
+          val st1 = push-el(stx, "template", Html, attrs1)
           st(Cons(Frame(FTemplateContent, Nil), st1.stack), st1.imode, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors)
         }
       elif selfClosing || (is-html-ns(ns) && is-void-element(name)) then
-        insert-void(st0, name, ns, attrs1)
+        insert-void(stx, name, ns, attrs1)
       else
-        push-el(st0, name, ns, attrs1)
+        push-el(stx, name, ns, attrs1)
     }
 
   fun end-tag(st0: dstate, name: string) : <div,exn> dstate
@@ -822,8 +903,48 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
       "html" -> True
       _ -> False
 
-  fun has-eof-disallowed(stack0: list<frame>) : <div> bool
+  fun has-eof-disallowed(stack0: list<frame>) : <div,exn> bool
     {
+      fun frag-context(stack1: list<frame>) : <div,exn> maybe<(string, namespace)>
+        match stack1
+          Nil -> Nothing
+          Cons(fr, rest) ->
+            match fr.kind
+              FFrag(mctx) ->
+                match mctx
+                  Just(Fragmentcontext(tag0, ns0)) ->
+                    {
+                      val tag = lower-ascii-string(tag0.trim)
+                      // For `#document-fragment html`, we don't synthesize a context element at all.
+                      if is-html-ns(ns0) && tag == "html" then Nothing
+                      else Just((adjust-tag-name(ns0, tag), ns0))
+                    }
+                  _ -> frag-context(rest)
+              _ -> frag-context(rest)
+
+      fun same-ns(a: namespace, b: namespace) : bool
+        match (a,b)
+          (Html, Html) -> True
+          (Svg, Svg) -> True
+          (Math, Math) -> True
+          _ -> False
+
+      fun drop-synthetic-context-before-html(xs: list<frame>, mctx: maybe<(string, namespace)>) : <div,exn> list<frame>
+        match (mctx, xs)
+          (Just((ctxName, ctxNs)), Cons(fr1, Cons(fr2, rest))) ->
+            match fr2.kind
+              FEl(nm2, ns2, _attrs2) ->
+                if is-html-ns(ns2) && nm2 == "html" then
+                  match fr1.kind
+                    FEl(nm1, ns1, _attrs1) ->
+                      if same-ns(ns1, ctxNs) && nm1 == ctxName then Cons(fr2, rest) else Cons(fr1, Cons(fr2, rest))
+                    _ -> Cons(fr1, Cons(fr2, rest))
+                else
+                  Cons(fr1, drop-synthetic-context-before-html(Cons(fr2, rest), mctx))
+              _ -> Cons(fr1, drop-synthetic-context-before-html(Cons(fr2, rest), mctx))
+          (m, Cons(fr1, Cons(fr2, rest))) -> Cons(fr1, drop-synthetic-context-before-html(Cons(fr2, rest), m))
+          _ -> xs
+
       fun after-template-content(xs: list<frame>) : maybe<list<frame>>
         match xs
           Nil -> Nothing
@@ -844,7 +965,8 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
                     if nm == "template" then rest else outside
                   _ -> outside
           Nothing -> stack0
-      match xs
+      val xs2 = drop-synthetic-context-before-html(xs, frag-context(stack0))
+      match xs2
         Nil -> False
         Cons(fr, rest) ->
           match fr.kind
@@ -853,8 +975,18 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
             _ -> has-eof-disallowed(rest)
     }
 
-  fun add-eof-error(st0: dstate) : <div> dstate
+  fun add-eof-error(st0: dstate) : <div,exn> dstate
     {
+      fun has-doc-root(stack0: list<frame>) : bool
+        match stack0
+          Nil -> False
+          Cons(fr, rest) ->
+            match fr.kind
+              FDoc -> True
+              _ -> has-doc-root(rest)
+
+      // html5lib expects an EOF error when there are still disallowed open elements, including
+      // for fragment parsing. (It treats template EOF as a separate count, for documents.)
       fun has-template-content(stack0: list<frame>) : bool
         match stack0
           Nil -> False
@@ -863,8 +995,9 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
               FTemplateContent -> True
               _ -> has-template-content(rest)
 
-      val add1 = if has-eof-disallowed(st0.stack) then 1 else 0
-      val add2 = if has-template-content(st0.stack) then 1 else 0
+      val add1 =
+        if has-eof-disallowed(st0.stack) then 1 else 0
+      val add2 = if has-doc-root(st0.stack) && has-template-content(st0.stack) then 1 else 0
       val n = add1 + add2
       if n <= 0 then st0
       else st(st0.stack, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors + n)
@@ -1789,7 +1922,7 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
                   val st1 = merge-html-attrs(add-error(stx), attrs)
                   (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False)
                 }
-              elif name == "head" then (stx, False)
+              elif name == "head" then (add-error(stx), False)
               elif name == "body" then
                 {
                   // Merge new attributes (without overwriting) into the existing <body>.
@@ -1843,6 +1976,9 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
               elif name == "frame" then
                 // Disallow <frame> in the body; ignore it.
                 (add-error(stx), False)
+              elif name == "frameset" then
+                // In the body insertion mode, treat <frameset> as a parse error and ignore it.
+                (add-error(stx), False)
               elif name == "button" then
                 {
                   // If a <button> is already in scope, close it before inserting a new one.
@@ -1869,78 +2005,125 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
             // Foreign-content end tags: if we are in a foreign namespace and see an end tag for a
             // different foreign element that is still open, count a parse error before popping.
             {
+              fun has-frag-root(stack0: list<frame>) : bool
+                match stack0
+                  Nil -> False
+                  Cons(fr, rest) ->
+                    match fr.kind
+                      FFrag(_) -> True
+                      _ -> has-frag-root(rest)
+
+              fun context-frame-before-html(stack0: list<frame>) : <div,exn> maybe<frame>
+                {
+                  fun go(prev: maybe<frame>, xs: list<frame>) : <div,exn> maybe<frame>
+                    match xs
+                      Nil -> Nothing
+                      Cons(fr, rest) ->
+                        match fr.kind
+                          FEl(nm, ns, _attrs) ->
+                            if is-html-ns(ns) && lower-ascii-string(nm) == "html" then prev
+                            else go(Just(fr), rest)
+                          _ -> go(Just(fr), rest)
+                  go(Nothing, stack0)
+                }
+
               val (curName0, curNs) = current-element(st0.stack)
               val curName = lower-ascii-string(curName0)
               val endName = lower-ascii-string(name)
-              val stForeign =
-                if !is-html-ns(curNs) && curName != endName then
-                  match open-element-ns(st0.stack, name)
-                    Just(nsFound) -> if !is-html-ns(nsFound) then add-error(st0) else st0
-                    _ -> st0
-                else
-                  st0
-              // Continue processing using the (possibly error-charged) state.
-              val st0x = stForeign
-              if name == "body" then
-                {
-                  // After the <html>/<body> elements have already been closed into the document,
-                  // html5lib expects stray </body> to be ignored without counting an extra error.
-                  if top-is-doc(st0x.stack) then
-                    (st(st0x.stack, AfterAfterBody, st0x.html-inserted, st0x.head-inserted, st0x.body-inserted, st0x.errors), False)
-                  else
-                    {
-                      // Per spec/html5lib: do not pop <body> here; just switch modes.
-                      val st0i = generate-implied-end-tags(st0x, "")
-                      val (curName1, _curNs) = current-element(st0i.stack)
-                      val stx = if lower-ascii-string(curName1) == "body" then st0i else add-error(st0i)
-                      (st(stx.stack, AfterBody, stx.html-inserted, stx.head-inserted, stx.body-inserted, stx.errors), False)
-                    }
-                }
-              elif name == "html" then
-                if top-is-doc(st0x.stack) then
-                  // After the <html> element has already been closed, a stray </html> should transition
-                  // back to AfterAfterBody so trailing comments can attach to the document.
-                  (st(st0x.stack, AfterAfterBody, st0x.html-inserted, st0x.head-inserted, st0x.body-inserted, st0x.errors), False)
-                else
-                  (st0x, False)
-              elif name == "br" then
-                (start-tag(add-error(st0x), "br", Nil, True), False)
-              elif name == "template" && in-template-content(st0x.stack) then
-                // html5lib's template fixture counts a mismatch error when </template> appears while there are still
-                // unclosed elements in the template content.
-                match st0x.stack
-                  Cons(fr, _) ->
-                    match fr.kind
-                      FTemplateContent -> (end-tag(st0x, "template"), False)
-                      _ -> (end-tag(add-error(st0x), "template"), False)
-                  _ -> (end-tag(add-error(st0x), "template"), False)
-              elif is-heading-element(name) then
-                if !has-heading-in-scope(st0x.stack) then
-                  (add-error(st0x), False)
-                else
-                  {
-                    val st0i = generate-implied-end-tags(st0x, "")
-                    val (curName1, _curNs1) = current-element(st0i.stack)
-                    val stx = if lower-ascii-string(curName1) == lower-ascii-string(name) then st0i else add-error(st0i)
-                    match nearest-heading-in-scope(stx.stack)
-                      Just(hname) ->
+
+              // Fragment contexts include a synthetic foreign element on the stack; an end tag for it
+              // without a matching start tag in the input should be treated as a stray end tag.
+              val contextMatchesCurrentForeign =
+                match context-frame-before-html(st0.stack)
+                  Just(frCtx) ->
+                    match frCtx.kind
+                      FEl(ctxName0, ctxNs, _ctxAttrs) ->
                         {
-                          val stack1 = pop-to(stx.stack, hname)
-                          (st(stack1, stx.imode, stx.html-inserted, stx.head-inserted, stx.body-inserted, stx.errors), False)
+                          val sameNs =
+                            match (ctxNs, curNs)
+                              (Svg, Svg) -> True
+                              (Math, Math) -> True
+                              _ -> False
+                          !is-html-ns(ctxNs) && sameNs && lower-ascii-string(ctxName0) == endName
                         }
-                      _ ->
-                        // Defensive fallback; shouldn't happen since `has-heading-in-scope` was true.
-                        (stx, False)
-                  }
+                      _ -> False
+                  _ -> False
+              val isStrayForeignContextEndTag =
+                has-frag-root(st0.stack) && !is-html-ns(curNs) && curName == endName && contextMatchesCurrentForeign
+              if isStrayForeignContextEndTag then
+                (add-error(st0), False)
               else
-                if has-open(st0x.stack, name) then
-                  if is-formatting-element(name) then
-                    (adoption-end-tag(st0x, name), False)
+                {
+                  val stForeign =
+                    if !is-html-ns(curNs) && curName != endName then
+                      match open-element-ns(st0.stack, name)
+                        Just(nsFound) -> if !is-html-ns(nsFound) then add-error(st0) else st0
+                        _ -> st0
+                    else
+                      st0
+                  // Continue processing using the (possibly error-charged) state.
+                  val st0x = stForeign
+                  if name == "body" then
+                    {
+                      // After the <html>/<body> elements have already been closed into the document,
+                      // html5lib expects stray </body> to be ignored without counting an extra error.
+                      if top-is-doc(st0x.stack) then
+                        (st(st0x.stack, AfterAfterBody, st0x.html-inserted, st0x.head-inserted, st0x.body-inserted, st0x.errors), False)
+                      else
+                        {
+                          // Per spec/html5lib: do not pop <body> here; just switch modes.
+                          val st0i = generate-implied-end-tags(st0x, "")
+                          val (curName1, _curNs) = current-element(st0i.stack)
+                          val stx = if lower-ascii-string(curName1) == "body" then st0i else add-error(st0i)
+                          (st(stx.stack, AfterBody, stx.html-inserted, stx.head-inserted, stx.body-inserted, stx.errors), False)
+                        }
+                    }
+                  elif name == "html" then
+                    if top-is-doc(st0x.stack) then
+                      // After the <html> element has already been closed, a stray </html> should transition
+                      // back to AfterAfterBody so trailing comments can attach to the document.
+                      (st(st0x.stack, AfterAfterBody, st0x.html-inserted, st0x.head-inserted, st0x.body-inserted, st0x.errors), False)
+                    else
+                      (st0x, False)
+                  elif name == "br" then
+                    (start-tag(add-error(st0x), "br", Nil, True), False)
+                  elif name == "template" && in-template-content(st0x.stack) then
+                    // html5lib's template fixture counts a mismatch error when </template> appears while there are still
+                    // unclosed elements in the template content.
+                    match st0x.stack
+                      Cons(fr, _) ->
+                        match fr.kind
+                          FTemplateContent -> (end-tag(st0x, "template"), False)
+                          _ -> (end-tag(add-error(st0x), "template"), False)
+                      _ -> (end-tag(add-error(st0x), "template"), False)
+                  elif is-heading-element(name) then
+                    if !has-heading-in-scope(st0x.stack) then
+                      (add-error(st0x), False)
+                    else
+                      {
+                        val st0i = generate-implied-end-tags(st0x, "")
+                        val (curName1, _curNs1) = current-element(st0i.stack)
+                        val stx = if lower-ascii-string(curName1) == lower-ascii-string(name) then st0i else add-error(st0i)
+                        match nearest-heading-in-scope(stx.stack)
+                          Just(hname) ->
+                            {
+                              val stack1 = pop-to(stx.stack, hname)
+                              (st(stack1, stx.imode, stx.html-inserted, stx.head-inserted, stx.body-inserted, stx.errors), False)
+                            }
+                          _ ->
+                            // Defensive fallback; shouldn't happen since `has-heading-in-scope` was true.
+                            (stx, False)
+                      }
                   else
-                    (end-tag(st0x, name), False)
-                else
-                  // Treat stray end tags as parse errors (html5lib tree tests count these).
-                  (st(st0x.stack, st0x.imode, st0x.html-inserted, st0x.head-inserted, st0x.body-inserted, st0x.errors + 1), False)
+                    if has-open(st0x.stack, name) then
+                      if is-formatting-element(name) then
+                        (adoption-end-tag(st0x, name), False)
+                      else
+                        (end-tag(st0x, name), False)
+                    else
+                      // Treat stray end tags as parse errors (html5lib tree tests count these).
+                      (st(st0x.stack, st0x.imode, st0x.html-inserted, st0x.head-inserted, st0x.body-inserted, st0x.errors + 1), False)
+                }
             }
           TokCharacter(s) ->
             if s == "" then (st0, False)
@@ -1965,14 +2148,86 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
             else
               (add-error(st0), False)
           TokEndTag(name) ->
-            if name == "frameset" then
-              {
-                val st1 = end-tag(st0, "frameset")
-                val m = if has-open(st1.stack, "frameset") then InFrameset else AfterFrameset
-                (st(st1.stack, m, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False)
-              }
-            else
-              (add-error(st0), False)
+            {
+              fun has-frag-root(stack0: list<frame>) : bool
+                match stack0
+                  Nil -> False
+                  Cons(fr, rest) ->
+                    match fr.kind
+                      FFrag(_) -> True
+                      _ -> has-frag-root(rest)
+
+              fun frag-context(stack1: list<frame>) : <div,exn> maybe<(string, namespace)>
+                match stack1
+                  Nil -> Nothing
+                  Cons(fr, rest) ->
+                    match fr.kind
+                      FFrag(mctx) ->
+                        match mctx
+                          Just(Fragmentcontext(tag0, ns0)) ->
+                            {
+                              val tag = lower-ascii-string(tag0.trim)
+                              if is-html-ns(ns0) && tag == "html" then Nothing
+                              else Just((adjust-tag-name(ns0, tag), ns0))
+                            }
+                          _ -> frag-context(rest)
+                      _ -> frag-context(rest)
+
+              fun same-ns(a: namespace, b: namespace) : bool
+                match (a,b)
+                  (Html, Html) -> True
+                  (Svg, Svg) -> True
+                  (Math, Math) -> True
+                  _ -> False
+
+              fun context-frame-before-html(stack0: list<frame>) : <div,exn> maybe<frame>
+                {
+                  fun go(prev: maybe<frame>, xs: list<frame>) : <div,exn> maybe<frame>
+                    match xs
+                      Nil -> Nothing
+                      Cons(fr, rest) ->
+                        match fr.kind
+                          FEl(nm, ns, _attrs) ->
+                            if is-html-ns(ns) && nm == "html" then prev
+                            else go(Just(fr), rest)
+                          _ -> go(Just(fr), rest)
+                  go(Nothing, stack0)
+                }
+
+              val (curName0, curNs) = current-element(st0.stack)
+              val curName = lower-ascii-string(curName0)
+              val endName = lower-ascii-string(name)
+              val contextMatches =
+                match frag-context(st0.stack)
+                  Just((ctxName0, ctxNs)) ->
+                    {
+                      val ctxName = lower-ascii-string(ctxName0)
+                      val frameMatches =
+                        match context-frame-before-html(st0.stack)
+                          Just(frCtx) ->
+                            match frCtx.kind
+                              FEl(ctxName1, ctxNs1, _attrs1) ->
+                                lower-ascii-string(ctxName1) == endName && same-ns(ctxNs1, curNs)
+                              _ -> False
+                          _ -> False
+                      ctxName == endName && same-ns(ctxNs, curNs) && frameMatches
+                    }
+                  _ -> False
+              val isStrayFragmentContextEndTag =
+                has-frag-root(st0.stack) && curName == endName && contextMatches
+
+              if name == "frameset" then
+                if isStrayFragmentContextEndTag then
+                  (add-error(st0), False)
+                else
+                  {
+                    val st1 = end-tag(st0, "frameset")
+                    val m = if has-open(st1.stack, "frameset") then InFrameset else AfterFrameset
+                    (st(st1.stack, m, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False)
+                  }
+              else
+                (add-error(st0), False)
+            }
           TokCharacter(s) ->
             if is-ws(s) then
               (append(st0, TText(s)), False)
@@ -2566,21 +2821,24 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
           if reprocess then process(Cons(t, rest), next) else process(rest, next)
         }
 
-  val st0 = st(Cons(Frame(FDoc, Nil), Nil), Initial, False, False, False, 0)
   val st1 = process(tokens, st0)
-  val st2 = if st1.html-inserted then st1 else ensure-html(st1, Nil)
-  val st3 =
-    {
-      val stx = if st2.head-inserted then st2 else ensure-head(st2, Nil)
-      if has-open(stx.stack, "head") then
-        st(pop-to(stx.stack, "head"), stx.imode, stx.html-inserted, stx.head-inserted, stx.body-inserted, stx.errors)
-      else
-        stx
-    }
   val st4 =
-    if st3.body-inserted then st3
+    if !finalizeDoc then st1
     else
-      { val stx = ensure-body(st3, Nil); st(pop-to(stx.stack, "body"), stx.imode, stx.html-inserted, stx.head-inserted, stx.body-inserted, stx.errors) }
+      {
+        val st2 = if st1.html-inserted then st1 else ensure-html(st1, Nil)
+        val st3 =
+          {
+            val stx = if st2.head-inserted then st2 else ensure-head(st2, Nil)
+            if has-open(stx.stack, "head") then
+              st(pop-to(stx.stack, "head"), stx.imode, stx.html-inserted, stx.head-inserted, stx.body-inserted, stx.errors)
+            else
+              stx
+          }
+        if st3.body-inserted then st3
+        else
+          { val stx = ensure-body(st3, Nil); st(pop-to(stx.stack, "body"), stx.imode, stx.html-inserted, stx.head-inserted, stx.body-inserted, stx.errors) }
+      }
 
   fun close-all(stack0: list<frame>) : <div,exn> list<frame>
     match stack0
@@ -2645,10 +2903,127 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
     match close-all(st4.stack)
       Cons(root, _) -> root.children.reverse
       _ -> Nil
-  val dom = arena-from-children(Document(Nil, "no-quirks"), closed)
-  (dom, st4.errors)
+  (closed, st4.errors)
 
-pub fun build-fragment(tokens: list<token>, fragCtx: fragmentcontext) : <div,exn> (dom, int)
-  val initial = Frame(FFrag(Just(fragCtx)), Nil)
-  val (children, errs) = build-tree(tokens, initial)
-  (arena-from-children(DocumentFragment(Nil, Just(fragCtx)), children), errs)
+pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <div,exn> (dom, int)
+  // M2: insertion-mode document builder (partial HTML5).
+  val st0 = Dstate(Cons(Frame(FDoc, Nil), Nil), Initial, False, False, False, Nil, 0)
+  val (children, errs) = run-treebuilder(tokens, st0, scriptingEnabled, True)
+  (arena-from-children(Document(Nil, "no-quirks"), children), errs)
+
+fun fragment-initial-mode(fragCtx: fragmentcontext) : <div,exn> mode
+  match fragCtx
+    Fragmentcontext(tag0, ns0) ->
+      {
+        val tag = lower-ascii-string(tag0.trim)
+        match ns0
+          Html ->
+            if tag == "html" then BeforeHead
+            elif tag == "frameset" then InFrameset
+            elif tag == "tbody" || tag == "thead" || tag == "tfoot" then InTableBody
+            elif tag == "tr" then InRow
+            elif tag == "td" || tag == "th" then InCell
+            elif tag == "colgroup" then InColumnGroup
+            elif tag == "table" then InTable
+            // Missing fine-grained modes (e.g. InCaption) fall back to table.
+            elif tag == "caption" then InTable
+            else InBody
+          _ -> InBody
+      }
+
+fun cleanup-fragment-wrappers(children0: list<tnode>, fragCtx: fragmentcontext) : <div,exn> list<tnode>
+  // Mirror the python reference behavior: create an `<html>` wrapper + context element during parsing,
+  // then remove both and promote the resulting children into the fragment root.
+  fun eq-ns(a: namespace, b: namespace) : bool
+    match (a,b)
+      (Html, Html) -> True
+      (Svg, Svg) -> True
+      (Math, Math) -> True
+      _ -> False
+  fun is-html-wrapper(n: tnode) : bool
+    match n
+      // Tokenizer already lowercases HTML tag names; keep this predicate total.
+      TEl(name, ns, _, _) -> is-html-ns(ns) && name == "html"
+      _ -> False
+
+  fun split-first(pred: (tnode)->bool, xs: list<tnode>, acc: list<tnode>) : <div,exn> (maybe<tnode>, list<tnode>)
+    match xs
+      Nil -> (Nothing, acc.reverse)
+      Cons(x, rest) ->
+        if pred(x) then (Just(x), (acc.reverse ++ rest))
+        else split-first(pred, rest, Cons(x, acc))
+
+  match fragCtx
+    Fragmentcontext(tag0, ctxNs) ->
+      {
+        val tag = lower-ascii-string(tag0.trim)
+        val ctxTag = adjust-tag-name(ctxNs, tag)
+        val (mh, withoutHtml) = split-first(is-html-wrapper, children0, Nil)
+        match mh
+          Nothing -> withoutHtml
+          Just(TEl(_hn, _hns, _hattrs, htmlKids0)) ->
+            {
+              // If the context is html itself, keep htmlKids as the fragment output.
+              if is-html-ns(ctxNs) && tag == "html" then htmlKids0
+              else
+                {
+                  fun lift-context(htmlKids: list<tnode>) : <div,exn> list<tnode>
+                    // Remove the context element (or template) and append its children/content to the html wrapper.
+                    fun is-ctx-el(n: tnode) : bool
+                      match n
+                        // `tag` is already lowercased.
+                        TEl(name, ns, _, _) -> eq-ns(ns, ctxNs) && name == ctxTag
+                        _ -> False
+
+                    // Template context: lift the template content rather than returning the <template> node.
+                    if is-html-ns(ctxNs) && tag == "template" then
+                      {
+                        fun is-template-node(n: tnode) : bool
+                          match n
+                            TTemplate(ns, _attrs, _content) -> is-html-ns(ns)
+                            _ -> False
+                        val (mt, rest0) = split-first(is-template-node, htmlKids, Nil)
+                        match mt
+                          Just(TTemplate(_ns, _attrs, contentKids)) -> rest0 ++ contentKids
+                          _ -> htmlKids
+                      }
+                    else
+                      {
+                        val (mctx, rest1) = split-first(is-ctx-el, htmlKids, Nil)
+                        match mctx
+                          Just(TEl(_cn, _cns, _cattrs, ctxKids)) -> rest1 ++ ctxKids
+                          _ -> htmlKids
+                      }
+
+                  // Preserve any non-html nodes that ended up at the fragment root, but append the html content last.
+                  withoutHtml ++ lift-context(htmlKids0)
+                }
+            }
+          _ -> withoutHtml
+      }
+
+pub fun build-fragment(tokens: list<token>, fragCtx: fragmentcontext, scriptingEnabled: bool = True) : <div,exn> (dom, int)
+  match fragCtx
+    Fragmentcontext(tag0, ctxNs) ->
+      {
+        val tag = lower-ascii-string(tag0.trim)
+        val htmlFrame = Frame(FEl("html", Html, Nil), Nil)
+        val rootFrame = Frame(FFrag(Just(fragCtx)), Nil)
+
+        val stack0 =
+          if is-html-ns(ctxNs) && tag == "html" then
+            Cons(htmlFrame, Cons(rootFrame, Nil))
+          elif is-html-ns(ctxNs) && tag == "template" then
+            // Parse inside a template's content fragment.
+            Cons(Frame(FTemplateContent, Nil), Cons(Frame(FEl("template", Html, Nil), Nil), Cons(htmlFrame, Cons(rootFrame, Nil))))
+          else
+            {
+              val ctxName = adjust-tag-name(ctxNs, tag)
+              Cons(Frame(FEl(ctxName, ctxNs, Nil), Nil), Cons(htmlFrame, Cons(rootFrame, Nil)))
+            }
+
+        val st0 = Dstate(stack0, fragment-initial-mode(fragCtx), True, False, False, Nil, 0)
+        val (children0, errs) = run-treebuilder(tokens, st0, scriptingEnabled, False)
+        val children = cleanup-fragment-wrappers(children0, fragCtx)
+        (arena-from-children(DocumentFragment(Nil, Just(fragCtx)), children), errs)
+      }
