@@ -2125,7 +2125,36 @@ pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <di
           TokEndTag(name) ->
             if in-template-content(st0.stack) then
               if has-open(st0.stack, name) then
-                { val st1 = end-tag(st0, name); (update-mode(st1), False) }
+                {
+                  // html5lib template fixtures count a parse error when </template> appears while there are still
+                  // unclosed elements in the template content.
+                  val st1 =
+                    if name == "template" then
+                      match st0.stack
+                        Cons(fr, _) ->
+                          match fr.kind
+                            FTemplateContent -> st0
+                            FEl(topName0, _topNs, _topAttrs) ->
+                              {
+                                val topName = lower-ascii-string(topName0)
+                                // html5lib's template fixtures do *not* count a mismatch error for certain
+                                // table-structure elements that remain open inside template content.
+                                val tableish =
+                                  topName == "caption"
+                                  || topName == "col"
+                                  || topName == "colgroup"
+                                  || topName == "tr"
+                                  || is-table-section(topName)
+                                  || is-table-cell(topName)
+                                if tableish then st0 else add-error(st0)
+                              }
+                            _ -> add-error(st0)
+                        _ -> add-error(st0)
+                    else
+                      st0
+                  val st2 = end-tag(st1, name)
+                  (update-mode(st2), False)
+                }
               else
                 {
                   fun is-tableish(tag: string) : bool
