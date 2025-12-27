@@ -1630,7 +1630,61 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
         val (st1, rep) = process-one(t2, with-mode(stx, InBody))
         (update-mode(st1), rep)
       }
-    match st0.imode
+    // HTML5 "in foreign content" dispatch: if the current node is not in the HTML namespace
+    // and is not an integration point, bypass insertion-mode-specific table/body rules.
+    // This is critical for passing svg/math fragment fixtures where table tags appear inside
+    // foreign elements.
+    val (curName0, curNs) = current-element(st0.stack)
+    val curName = lower-ascii-string(curName0)
+    fun is-integration-point(ns: namespace, name0: string) : <div,exn> bool
+      match ns
+        Svg -> is-svg-html-integration-point(name0)
+        Math -> is-math-text-integration-point(lower-ascii-string(name0))
+        _ -> False
+
+    fun is-table-mode(m: mode) : bool
+      match m
+        InTable -> True
+        InTableBody -> True
+        InColumnGroup -> True
+        InRow -> True
+        InCell -> True
+        _ -> False
+
+    val useForeign0 = (!is-html-ns(curNs) && !is-integration-point(curNs, curName0))
+    val useForeign = (useForeign0 && is-table-mode(st0.imode))
+    if useForeign then
+      match t
+        TokStartTag(name0, attrs, selfClosing) ->
+          {
+            val name = lower-ascii-string(name0)
+            // In foreign content, certain HTML elements (like <p>, <br>, <nobr>, etc.) must
+            // "break out" and be processed using the current insertion mode rules.
+            if is-foreign-breakout-element(name) then
+              {
+                val st1 = add-error(st0)
+                val stack1 = pop-foreign-elements(st1.stack)
+                // Reprocess the token in the current insertion mode (now in HTML namespace).
+                (st(stack1, st1.imode, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True)
+              }
+            else
+              (start-tag(st0, name, attrs, selfClosing), False)
+          }
+        TokEndTag(name) ->
+          {
+            val endName = lower-ascii-string(name)
+            val stx =
+              if has-open(st0.stack, name) && curName != endName then add-error(st0) else st0
+            val st1 =
+              if has-open(stx.stack, name) then end-tag(stx, name) else add-error(stx)
+            (st1, False)
+          }
+        TokCharacter(s) ->
+          if s == "" then (st0, False) else (append(st0, TText(s)), False)
+        TokComment(data) -> (append(st0, TComment(data)), False)
+        TokDoctype(_,_,_,_) -> (add-error(st0), False)
+        TokEOF -> (add-eof-error(st0), False)
+    else match st0.imode
       Initial ->
         match t
           TokDoctype(name, publicId, systemId, forceQuirks) ->
@@ -2532,36 +2586,57 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
           TokStartTag(name, attrs, selfClosing) ->
             if in-template-content(st0.stack) then
               (start-tag(st0, name, attrs, selfClosing), False)
-            elif name == "caption" then
-              {
-                // Pop the table body element so `<caption>` becomes a direct child of `<table>`.
-                val st1 = close-row(st0)
-                val st2 =
-                  if has-open(st1.stack, "tbody") then end-tag(st1, "tbody")
-                  elif has-open(st1.stack, "thead") then end-tag(st1, "thead")
-                  elif has-open(st1.stack, "tfoot") then end-tag(st1, "tfoot")
-                  else st1
-                (st(st2.stack, InTable, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors), True)
-              }
-            elif name == "tr" then
-              { val st1 = start-tag(st0, name, attrs, selfClosing); (st(st1.stack, InRow, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False) }
-            elif is-table-cell(name) then
-              {
-                val st1 = add-error(st0)
-                val st2 = ensure-tr(st1)
-                val st3 = start-tag(st(st2.stack, InRow, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors), name, attrs, selfClosing)
-                (st(st3.stack, InCell, st3.html-inserted, st3.head-inserted, st3.body-inserted, st3.errors), False)
-              }
-            elif is-table-section(name) then
-              {
-                val st1 = close-row(st0)
-                val st2 = end-tag(st1, name)
-                (st(st2.stack, InTable, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors), True)
-              }
-            elif name == "table" then
-              { val st1 = add-error(st0); (st(st1.stack, InTable, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True) }
             else
-              (start-tag(st0, name, attrs, selfClosing), False)
+              {
+                val (curNm0, curNs0) = current-element(st0.stack)
+                val inIntegration =
+                  match curNs0
+                    Svg -> is-svg-html-integration-point(curNm0)
+                    Math -> is-math-text-integration-point(lower-ascii-string(curNm0))
+                    _ -> False
+                val noTable = !has-open(st0.stack, "table")
+                val isTableStruct =
+                  (name == "td" || name == "th" || name == "tr" || is-table-section(name) || name == "table"
+                    || name == "caption" || name == "col" || name == "colgroup")
+
+                if inIntegration && noTable && isTableStruct then
+                  (add-error(st0), False)
+                elif name == "caption" then
+                  {
+                    // Pop the table body element so `<caption>` becomes a direct child of `<table>`.
+                    val st1 = close-row(st0)
+                    val st2 =
+                      if has-open(st1.stack, "tbody") then end-tag(st1, "tbody")
+                      elif has-open(st1.stack, "thead") then end-tag(st1, "thead")
+                      elif has-open(st1.stack, "tfoot") then end-tag(st1, "tfoot")
+                      else st1
+                    (st(st2.stack, InTable, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors), True)
+                  }
+                elif name == "tr" then
+                  { val st1 = start-tag(st0, name, attrs, selfClosing); (st(st1.stack, InRow, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False) }
+                elif is-table-cell(name) then
+                  {
+                    val st1 = add-error(st0)
+                    val st2 = ensure-tr(st1)
+                    val st3 = start-tag(st(st2.stack, InRow, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors), name, attrs, selfClosing)
+                    (st(st3.stack, InCell, st3.html-inserted, st3.head-inserted, st3.body-inserted, st3.errors), False)
+                  }
+                elif is-table-section(name) then
+                  {
+                    val st1 = close-row(st0)
+                    val st2 = end-tag(st1, name)
+                    (st(st2.stack, InTable, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors), True)
+                  }
+                elif name == "table" then
+                  { val st1 = add-error(st0); (st(st1.stack, InTable, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True) }
+                else
+                  {
+                    // In table-body contexts, foreign tags are parse errors but should still be inserted.
+                    val ns0 = element-ns(st0.stack, name)
+                    val st1 = if is-html-ns(ns0) then st0 else add-error(st0)
+                    (start-tag(st1, name, attrs, selfClosing), False)
+                  }
+              }
           TokEndTag(name) ->
             if in-template-content(st0.stack) then
               if has-open(st0.stack, name) then
@@ -2576,7 +2651,20 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
               else
                 (st(st0.stack, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors + 1), False)
             elif name == "table" then
-              { val st1 = close-row(st0); val st2 = end-tag(st1, "tbody"); (st(st2.stack, InTable, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors), True) }
+              {
+                val (curNm0, curNs0) = current-element(st0.stack)
+                val inIntegration =
+                  match curNs0
+                    Svg -> is-svg-html-integration-point(curNm0)
+                    Math -> is-math-text-integration-point(lower-ascii-string(curNm0))
+                    _ -> False
+                val noTable = !has-open(st0.stack, "table")
+                if inIntegration && noTable then
+                  // Ignore </table> at an integration point when no table is actually open.
+                  (add-error(st0), False)
+                else
+                  { val st1 = close-row(st0); val st2 = end-tag(st1, "tbody"); (st(st2.stack, InTable, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors), True) }
+              }
             else
               if has-open(st0.stack, name) then
                 { val st1 = end-tag(st0, name); (update-mode(st1), False) }
@@ -2636,28 +2724,50 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
           TokStartTag(name, attrs, selfClosing) ->
             if in-template-content(st0.stack) then
               (start-tag(st0, name, attrs, selfClosing), False)
-            elif is-table-cell(name) then
-              { val st1 = start-tag(st0, name, attrs, selfClosing); (st(st1.stack, InCell, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False) }
-            elif name == "caption" then
-              {
-                // Close the current row and let table-body mode place `<caption>` correctly.
-                val st1 = end-tag(st0, "tr")
-                (st(st1.stack, InTableBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True)
-              }
-            elif name == "tr" then
-              {
-                // Close the current row before starting a new one.
-                val st1 = end-tag(st0, "tr")
-                (st(st1.stack, InTableBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True)
-              }
-            elif is-table-section(name) || name == "table" then
-              {
-                val st1 = add-error(st0)
-                val st2 = end-tag(st1, "tr")
-                (st(st2.stack, InTableBody, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors), True)
-              }
             else
-              (start-tag(st0, name, attrs, selfClosing), False)
+              {
+                val (curNm0, curNs0) = current-element(st0.stack)
+                val inIntegration =
+                  match curNs0
+                    Svg -> is-svg-html-integration-point(curNm0)
+                    Math -> is-math-text-integration-point(lower-ascii-string(curNm0))
+                    _ -> False
+                val noTable = !has-open(st0.stack, "table")
+                val isTableStruct =
+                  (name == "td" || name == "th" || name == "tr" || is-table-section(name) || name == "table"
+                    || name == "caption" || name == "col" || name == "colgroup")
+
+                if inIntegration && noTable && isTableStruct then
+                  // Approximate "table mode without a table in scope": ignore table-structure tags here.
+                  (add-error(st0), False)
+                elif is-table-cell(name) then
+                  { val st1 = start-tag(st0, name, attrs, selfClosing); (st(st1.stack, InCell, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False) }
+                elif name == "caption" then
+                  {
+                    // Close the current row and let table-body mode place `<caption>` correctly.
+                    val st1 = end-tag(st0, "tr")
+                    (st(st1.stack, InTableBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True)
+                  }
+                elif name == "tr" then
+                  {
+                    // Close the current row before starting a new one.
+                    val st1 = end-tag(st0, "tr")
+                    (st(st1.stack, InTableBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True)
+                  }
+                elif is-table-section(name) || name == "table" then
+                  {
+                    val st1 = add-error(st0)
+                    val st2 = end-tag(st1, "tr")
+                    (st(st2.stack, InTableBody, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors), True)
+                  }
+                else
+                  {
+                    // In row contexts, foreign start tags (like <svg>/<math>) are parse errors but still inserted.
+                    val ns0 = element-ns(st0.stack, name)
+                    val st1 = if is-html-ns(ns0) then st0 else add-error(st0)
+                    (start-tag(st1, name, attrs, selfClosing), False)
+                  }
+              }
           TokEndTag(name) ->
             if in-template-content(st0.stack) then
               if has-open(st0.stack, name) then
@@ -2722,18 +2832,57 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
           TokStartTag(name, attrs, selfClosing) ->
             if in-template-content(st0.stack) then
               (start-tag(st0, name, attrs, selfClosing), False)
-            elif is-one-of(name, Cons("td", Cons("th", Cons("tr", Cons("tbody", Cons("thead", Cons("tfoot", Cons("table", Nil)))))))) then
-              {
-                // Close the current cell and reprocess.
-                // html5lib counts an error here for nested cell start tags, but not for all table-structure tags.
-                val (curName, _curNs) = current-element(st0.stack)
-                val curLow = lower-ascii-string(curName)
-                val st1 = if (name == "td" || name == "th") && curLow != "td" && curLow != "th" then add-error(st0) else st0
-                val st2 = close-cell(st1)
-                (st(st2.stack, InRow, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors), True)
-              }
             else
-              (start-tag(st0, name, attrs, selfClosing), False)
+              {
+                // When parsing HTML tokens at an SVG/MathML integration point, html5lib behaves
+                // like the spec: table-mode tokens should be handled as "in body" when there's
+                // no <table> in scope. Our simplified model doesn't track table scope, so we
+                // approximate this with "no open <table>" and ignore common table-structure tags.
+                val (curNm0, curNs0) = current-element(st0.stack)
+                val inIntegration =
+                  match curNs0
+                    Svg -> is-svg-html-integration-point(curNm0)
+                    Math -> is-math-text-integration-point(lower-ascii-string(curNm0))
+                    _ -> False
+                val noTable = !has-open(st0.stack, "table")
+                val isTableStruct =
+                  is-one-of(
+                    name,
+                    Cons(
+                      "td",
+                      Cons(
+                        "th",
+                        Cons(
+                          "tr",
+                          Cons(
+                            "tbody",
+                            Cons(
+                              "thead",
+                              Cons(
+                                "tfoot",
+                                Cons("table", Cons("caption", Cons("col", Cons("colgroup", Nil))))
+                              )
+                            )
+                          )
+                        )
+                      )
+                    )
+                  )
+                if inIntegration && noTable && isTableStruct then
+                  (add-error(st0), False)
+                elif is-one-of(name, Cons("td", Cons("th", Cons("tr", Cons("tbody", Cons("thead", Cons("tfoot", Cons("table", Nil)))))))) then
+                  {
+                    // Close the current cell and reprocess.
+                    // html5lib counts an error here for nested cell start tags, but not for all table-structure tags.
+                    val (curName, _curNs) = current-element(st0.stack)
+                    val curLow = lower-ascii-string(curName)
+                    val st1 = if (name == "td" || name == "th") && curLow != "td" && curLow != "th" then add-error(st0) else st0
+                    val st2 = close-cell(st1)
+                    (st(st2.stack, InRow, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors), True)
+                  }
+                else
+                  (start-tag(st0, name, attrs, selfClosing), False)
+              }
           TokCharacter(s) ->
             if s == "" then (st0, False) else (append(st0, TText(s)), False)
           TokComment(data) -> (append(st0, TComment(data)), False)

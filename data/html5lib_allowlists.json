@@ -8038,7 +8038,16 @@
       "inbody01.dat": [],
       "isindex.dat": [],
       "main-element.dat": [],
-      "math.dat": [],
+      "math.dat": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ],
       "menuitem-element.dat": [],
       "namespace-sensitivity.dat": [],
       "noscript01.dat": [],
@@ -8049,7 +8058,16 @@
       "ruby.dat": [],
       "scriptdata01.dat": [],
       "search-element.dat": [],
-      "svg.dat": [],
+      "svg.dat": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ],
       "tables01.dat": [],
       "template.dat": [
         0
