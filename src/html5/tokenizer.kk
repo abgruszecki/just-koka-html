@@ -105,11 +105,30 @@ fun lower-ascii(c: char) : char
 fun is-ascii-alnum(c: char) : bool
   (c >= '0' && c <= '9') || is-ascii-alpha(c)
 
-fun is-ws(c: char) : bool
-  c == ' ' || c == '\n' || c == '\t' || c == '\r' || c == '\u000c'
-
 fun repl-nul(c: char) : char
   if c == '\u0000' then '\uFFFD' else c
+
+fun is-ascii-ws(cp: int) : bool
+  // ASCII whitespace per the HTML spec: tab, lf, ff, cr, space.
+  cp == 9 || cp == 10 || cp == 12 || cp == 13 || cp == 32
+
+fun is-ws(c: char) : bool
+  is-ascii-ws(c.int)
+
+fun list-all-ascii-ws(cs: list<char>) : bool
+  match cs
+    Nil -> True
+    Cons(ch, rest) -> is-ws(ch) && list-all-ascii-ws(rest)
+
+fun string-has-ascii-ws(s: string) : <div,exn> bool
+  val cs = string/vector(s)
+  var has := False
+  var i := 0
+  while(fn(){ !has && i < cs.length }, fn(){
+    has := is-ws(cs[i])
+    i := i + 1
+  })
+  has
 
 fun lower-ascii-string(s: string) : <div,exn> string
   val cs = string/vector(s)
@@ -391,6 +410,7 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
   var cur-selfclosing := False
   var cur-attr-name : list<char> := Nil
   var cur-attr-value : list<char> := Nil
+  var cur-attr-value-unquoted := False
   var in-attr := False
   var temp-buffer : list<char> := Nil  // for rawtext/RCDATA/script end tag matching
 
@@ -398,10 +418,12 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
   var out : list<token> := Nil
   var text-acc : list<char> := Nil
   var comment-acc : list<char> := Nil
+  var doctype-open := False
   var doctype-name : list<char> := Nil
   var doctype-public : maybe<string> := Nothing
   var doctype-system : maybe<string> := Nothing
   var doctype-force := False
+  var doctype-trailing-ws := False
   var doctype-id-acc : list<char> := Nil
   var doctype-saw-ws := False
   var last-start := lastStartTag
@@ -481,9 +503,14 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
 
   fun finish-attr()
     if in-attr then
-      val n = string/listchar/string(cur-attr-name.reverse).trim
-      val v = string/listchar/string(cur-attr-value.reverse)
-      if n != "" then
+      val rawName = cur-attr-name.reverse
+      val n = string/listchar/string(rawName).trim
+
+      val rawValue = cur-attr-value.reverse
+      val v0 = string/listchar/string(rawValue)
+      val v = if cur-attr-value-unquoted && list-all-ascii-ws(rawValue) then "" else v0
+
+      if n != "" && !string-has-ascii-ws(n) then
         val an = Attrname(None, n)
         if has-attr(an, cur-attrs) then
           add-err("duplicate-attribute", cur-pos)
@@ -491,6 +518,7 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
           cur-attrs := Cons(Attr(an, v), cur-attrs)
       cur-attr-name := Nil
       cur-attr-value := Nil
+      cur-attr-value-unquoted := False
       in-attr := False
 
   fun finish-tag()
@@ -546,12 +574,14 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
   fun emit-doctype()
     val name = string/listchar/string(doctype-name.reverse).trim
     emit-token(TokDoctype(name, doctype-public, doctype-system, doctype-force))
+    doctype-open := False
     doctype-name := Nil
     doctype-public := Nothing
     doctype-system := Nothing
     doctype-force := False
     doctype-id-acc := Nil
     doctype-saw-ws := False
+    doctype-trailing-ws := False
 
   fun map-initial(s: tokenizer-state) : st
     match s
@@ -568,6 +598,11 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
   fun reconsume(prev: st)
     state := prev
     i := i - 1
+
+  fun find-next-gt(from: int) : <div,exn> int
+    var j := from
+    while(fn(){ j < cs.length && cs[j] != '>' }, fn(){ j := j + 1 })
+    if j < cs.length then j else -1
 
   while(fn(){ i < cs.length }, fn(){
     cur-pos := i
@@ -846,10 +881,12 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
           i := i + 1
         elif starts-with-ci(cs, i, "DOCTYPE") then
           // Consume "<!DOCTYPE"
+          doctype-open := True
           doctype-name := Nil
           doctype-public := Nothing
           doctype-system := Nothing
           doctype-force := False
+          doctype-trailing-ws := False
           doctype-id-acc := Nil
           doctype-saw-ws := False
           state := SBeforeDoctypeName
@@ -1004,7 +1041,17 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
         elif starts-with-ci(cs, i, "SYSTEM") then
           { state := SAfterDoctypeSystemKeyword; i := i + 5 }
         else
-          { doctype-force := True; state := SBogusDoctype }
+          {
+            // Enter bogus DOCTYPE state. As an optimization (and to avoid
+            // accidentally interpreting bogus-doctype contents as markup), skip
+            // directly to the next '>' when present.
+            doctype-force := True
+            val gt = find-next-gt(i)
+            if gt >= 0 then
+              { i := gt; emit-doctype(); state := SData }
+            else
+              state := SBogusDoctype
+          }
       SAfterDoctypePublicKeyword ->
         if is-ws(c) then
           state := SBeforeDoctypePublicId
@@ -1100,8 +1147,8 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
         else
           doctype-id-acc := Cons(repl-nul(c), doctype-id-acc)
       SAfterDoctypeSystemId ->
-        if is-ws(c) then
-          ()
+        if is-ascii-ws(c.int) then
+          doctype-trailing-ws := True
         elif c == '>' then
           { emit-doctype(); state := SData }
         else
@@ -1162,6 +1209,7 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
           if cur-is-end && !endtag-attr-error-emitted && !endtag-solidus-saw-non-gt then
             { add-err("attributes-in-end-tag", i); add-err("end-tag-with-attributes", i); endtag-attr-error-emitted := True }
           in-attr := True
+          cur-attr-value-unquoted := False
           cur-attr-name := Cons(repl-nul(lower-ascii(c)), Nil)
           cur-attr-value := Nil
           state := SAttrName
@@ -1192,20 +1240,24 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
           if cur-is-end && !endtag-attr-error-emitted && !endtag-solidus-saw-non-gt then
             { add-err("attributes-in-end-tag", i); add-err("end-tag-with-attributes", i); endtag-attr-error-emitted := True }
           in-attr := True
+          cur-attr-value-unquoted := False
           cur-attr-name := Cons(repl-nul(lower-ascii(c)), Nil)
           cur-attr-value := Nil
           state := SAttrName
       SBeforeAttrValue ->
-        if c == ' ' || c == '\n' || c == '\t' || c == '\r' then
+        if is-ws(c) then
           ()
         elif c == '\"' then
+          cur-attr-value-unquoted := False
           state := SAttrValueDQ
         elif c == '\'' then
+          cur-attr-value-unquoted := False
           state := SAttrValueSQ
         elif c == '>' then
           { finish-tag(); state := tag-next-state }
         else
           cur-attr-value := Cons(repl-nul(c), Nil)
+          cur-attr-value-unquoted := True
           state := SAttrValueUQ
       SAttrValueDQ ->
         if c == '\"' then
@@ -1234,7 +1286,7 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
         else
           cur-attr-value := Cons(repl-nul(c), cur-attr-value)
       SAttrValueUQ ->
-        if c == ' ' || c == '\n' || c == '\t' || c == '\r' then
+        if is-ws(c) then
           finish-attr()
           state := SBeforeAttrName
         elif c == '>' then
@@ -1249,7 +1301,7 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
         else
           cur-attr-value := Cons(repl-nul(c), cur-attr-value)
       SAfterAttrValueQ ->
-        if c == ' ' || c == '\n' || c == '\t' || c == '\r' then
+        if is-ws(c) then
           state := SBeforeAttrName
         elif c == '/' then
           state := SSelfClosingStartTag
@@ -1330,8 +1382,13 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
     SDoctypeSystemIdDQ -> { doctype-force := True; doctype-system := Just(string/listchar/string(doctype-id-acc.reverse)); emit-doctype() }
     SDoctypeSystemIdSQ -> { doctype-force := True; doctype-system := Just(string/listchar/string(doctype-id-acc.reverse)); emit-doctype() }
     SAfterDoctypeSystemId -> { doctype-force := True; emit-doctype() }
-    SBogusDoctype -> { doctype-force := True; emit-doctype() }
+    SBogusDoctype ->
+      { if doctype-trailing-ws then doctype-force := True else (); emit-doctype() }
     _ -> ()
+  // Safety: if we entered a doctype declaration but exited the state machine
+  // without emitting (e.g. due to a bug/edge case), ensure we emit at EOF.
+  if doctype-open then
+    emit-doctype()
   flush-text()
   out := Cons(TokEOF, out)
   (out.reverse, errs.reverse)
