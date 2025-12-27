@@ -2592,16 +2592,32 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
                 (update-mode(st2), False)
               }
             elif name == "table" then
-              if has-open(st0.stack, "select") then
-                {
-                  // In select-in-table-like cases, close <select> first (foster-parented), then reprocess </table>.
-                  // html5lib doesn't count an extra error for this </table> (see `tables01.dat` #8).
-                  val stack1 = pop-to-select-foster(st0.stack)
-                  val st2 = st(stack1, InTable, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors)
-                  (st2, True)
-                }
-              else
-                { val st1 = end-tag(st0, "table"); (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False) }
+              {
+                // Fragment parsing in a <table> context: ignore a leading </table>.
+                fun is-frag-table-context(stack0: list<frame>) : <div,exn> bool
+                  match stack0
+                    Nil -> False
+                    Cons(fr, rest) ->
+                      match fr.kind
+                        FFrag(Just(Fragmentcontext(tag0, ns0))) ->
+                          is-html-ns(ns0) && lower-ascii-string(tag0.trim) == "table"
+                        _ -> is-frag-table-context(rest)
+
+                val (curName0, curNs0, _curAttrs) = current-element(st0.stack)
+                val curLow = lower-ascii-string(curName0)
+                if is-frag-table-context(st0.stack) && is-html-ns(curNs0) && curLow == "table" then
+                  (add-error(st0), False)
+                elif has-open(st0.stack, "select") then
+                  {
+                    // In select-in-table-like cases, close <select> first (foster-parented), then reprocess </table>.
+                    // html5lib doesn't count an extra error for this </table> (see `tables01.dat` #8).
+                    val stack1 = pop-to-select-foster(st0.stack)
+                    val st2 = st(stack1, InTable, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors)
+                    (st2, True)
+                  }
+                else
+                  { val st1 = end-tag(st0, "table"); (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False) }
+              }
             else
               {
                 fun is-tableish(tag: string) : bool
