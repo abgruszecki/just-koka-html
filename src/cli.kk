@@ -13,6 +13,7 @@ import html5/base64
 import html5/tokenizer
 import html5/treebuilder
 import html5/dom
+import html5/encoding
 
 fun state-from-arg(s: string) : tokenizer/tokenizer-state
   match s
@@ -195,6 +196,40 @@ fun run-tree-batch() : <console,div,exn> ()
 
   json/arr(go(0, Nil)).println
 
+fun run-encoding-batch() : <console,div,exn> ()
+  // stdin protocol:
+  // - First line: integer N
+  // - Per case:
+  //   - Header line: "<transportOr->\t<base64_char_len>"
+  //   - Followed by as many base64 chunk lines (<= ~900 chars) as needed
+  val n = readline().trim.parse-int.default(0)
+
+  fun read-b64(remaining: int, acc: list<string>) : <console,div,exn> list<string>
+    if remaining <= 0 then acc else
+      val chunk = readline()
+      read-b64(remaining - chunk.count, Cons(chunk, acc))
+
+  fun go(i: int, outs: list<string>) : <console,div,exn> list<string>
+    if i >= n then outs.reverse else
+      val header = readline()
+      val parts = string/sep/split(header, "\t")
+      match parts
+        Cons(transportArg, Cons(lenStr, _rest)) ->
+          {
+            val b64len = lenStr.trim.parse-int.default(-1)
+            if b64len < 0 then exn/throw("invalid base64 length")
+            val chunks = read-b64(b64len, Nil)
+            val b64 = chunks.reverse.join("")
+            if b64.count != b64len then exn/throw("base64 length mismatch")
+            val bytes = base64/decode-bytes(b64)
+            val transport = if transportArg == "-" then Nothing else Just(transportArg)
+            val enc = encoding/sniff-encoding(bytes, transport)
+            go(i + 1, Cons(json/escape-string(enc), outs))
+          }
+        _ -> exn/throw("invalid batch line (expected 2 tab-separated fields)")
+
+  json/arr(go(0, Nil)).println
+
 fun saw-leading-doctype(ts: list<tokenizer/token>) : <div,exn> bool
   fun is-ws-only(s: string) : <div,exn> bool
     val cs = string/vector(s)
@@ -244,6 +279,7 @@ pub fun main()
         "tokenizer-batch" -> run-tokenizer-batch(False)
         "tokenizer-batch-xml" -> run-tokenizer-batch(True)
         "tree-batch" -> run-tree-batch()
+        "encoding-batch" -> run-encoding-batch()
         "tree-debug" -> run-tree-debug(Cons(cmd, rest))
-        _ -> "usage: cli tokenizer <state> <lastStartTagOr-> <inputPath> | cli tokenizer-batch | cli tree-batch".println
-    _ -> "usage: cli tokenizer <state> <lastStartTagOr-> <inputPath> | cli tokenizer-batch | cli tree-batch".println
+        _ -> "usage: cli tokenizer <state> <lastStartTagOr-> <inputPath> | cli tokenizer-batch | cli tree-batch | cli encoding-batch".println
+    _ -> "usage: cli tokenizer <state> <lastStartTagOr-> <inputPath> | cli tokenizer-batch | cli tree-batch | cli encoding-batch".println

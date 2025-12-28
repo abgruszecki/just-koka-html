@@ -7,6 +7,7 @@ import html5/dom
 import html5/tokenizer
 import html5/treebuilder
 import html5/serialize
+import html5/encoding
 
 pub alias parseerror = errors/parseerror
 
@@ -92,3 +93,10 @@ pub fun parse-fragment(html: string, fragCtx: fragmentcontext, opts: parseoption
 pub val tokenize = tokenizer/tokenize
 
 pub val to-test-format = serialize/to-test-format
+
+pub val sniff-encoding = encoding/sniff-encoding
+
+pub fun parse-bytes(bytes: vector<int>, opts: parseoptions = default-parse-options, transport-encoding: maybe<string> = Nothing)
+  : <div,exn> parseresult
+  val (html, _enc) = encoding/decode-html(bytes, transport-encoding)
+  parse(html, opts)

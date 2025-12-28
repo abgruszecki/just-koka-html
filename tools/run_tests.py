@@ -51,6 +51,7 @@ def main() -> int:
     build_runner()
     smoke_test()
     run(["python3", "tools/run_html5lib_tests.py", "--build"])
+    run(["python3", "tools/run_encoding_tests.py", "--build"])
     return 0
 
 

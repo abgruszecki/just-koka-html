@@ -13,7 +13,7 @@ pub fun decode-utf8(b64: string) : <div,exn> string
   val bytes = decode-bytes(b64)
   utf8-bytes-to-string(bytes)
 
-fun decode-bytes(b64: string) : <div,exn> vector<int>
+pub fun decode-bytes(b64: string) : <div,exn> vector<int>
   val cs = string/vector(b64)
   var out : list<int> := Nil
   // current 24-bit buffer and number of 6-bit groups collected
