@@ -36,6 +36,7 @@ type mode {
   AfterFrameset
   AfterAfterFrameset
   InTable
+  InCaption
   InTableBody
   InColumnGroup
   InRow
@@ -849,6 +850,35 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
             }
           _ -> stack0
       _ -> stack0
+
+  fun clear-back-to-table-context(st0: dstate) : <div,exn> dstate
+    // https://html.spec.whatwg.org/multipage/parsing.html#clear-the-stack-back-to-a-table-context
+    // Implemented iteratively to keep the compiler happy under -O2.
+    var stack := st0.stack
+    var done := False
+    while(fn(){ !done }, fn(){
+      match stack
+        Nil -> done := True
+        Cons(fr, _) ->
+          match fr.kind
+            FEl(nm, ns, _attrs) ->
+              {
+                // Element names in the HTML namespace are already normalized to lowercase.
+                if is-html-ns(ns) && (nm == "table" || nm == "template" || nm == "html") then
+                  done := True
+                else
+                  stack := pop-to(stack, nm)
+              }
+            FElFoster(nm, ns, _attrs) ->
+              {
+                if is-html-ns(ns) && (nm == "table" || nm == "template" || nm == "html") then
+                  done := True
+                else
+                  stack := pop-to(stack, nm)
+              }
+            _ -> done := True
+    })
+    st(stack, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors)
 
   fun ensure-html(st0: dstate, attrs: list<attr>) : dstate
     if st0.html-inserted then st0 else
@@ -1889,6 +1919,7 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
     elif has-open(stack0, "tr") then InRow
     elif has-open-any(stack0, Cons("tbody", Cons("thead", Cons("tfoot", Nil)))) then InTableBody
     elif has-open(stack0, "colgroup") then InColumnGroup
+    elif has-open(stack0, "caption") then InCaption
     elif has-open(stack0, "table") then InTable
     else InBody
 
@@ -2714,6 +2745,26 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
             if name == "html" then (st0, False) else (add-error(st0), False)
           TokDoctype(_,_,_,_) -> (add-error(st0), False)
           TokEOF -> (add-eof-error(st0), False)
+      InCaption ->
+        match t
+          TokCharacter(s) -> (append(st0, TText(s)), False)
+          TokComment(data) -> (append(st0, TComment(data)), False)
+          TokDoctype(_,_,_,_) -> (add-error(st0), False)
+          TokStartTag(name, attrs, selfClosing) ->
+            // Minimal caption insertion-mode handling:
+            // - allow normal HTML flow inside the caption
+            // - ignore table-structure tokens (tbody/tr/td/...) when not in a table context
+            if is-table-section(name) || name == "tr" || is-table-cell(name) || name == "col" || name == "colgroup" then
+              (add-error(st0), False)
+            else
+              (start-tag(st0, name, attrs, selfClosing), False)
+          TokEndTag(name) ->
+            if name == "caption" then
+              (update-mode(end-tag(st0, "caption")), False)
+            else
+              // Other end tags behave like in-body: close if possible, otherwise ignore.
+              if has-open(st0.stack, name) then (end-tag(st0, name), False) else (add-error(st0), False)
+          TokEOF -> (add-eof-error(st0), False)
       InTable ->
         match t
           TokStartTag(name, attrs, selfClosing) ->
@@ -2762,15 +2813,20 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
                   }
               }
             elif name == "colgroup" then
-              { val st1 = start-tag(st0, name, attrs, selfClosing); (st(st1.stack, InColumnGroup, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False) }
+              {
+                val stc = clear-back-to-table-context(st0)
+                val st1 = start-tag(stc, name, attrs, selfClosing)
+                (st(st1.stack, InColumnGroup, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False)
+              }
             elif name == "col" then
               {
+                val stc = clear-back-to-table-context(st0)
                 // Insert an implied <colgroup> and reprocess the <col> token in InColumnGroup.
-                val st1 = start-tag(st0, "colgroup", Nil, False)
+                val st1 = start-tag(stc, "colgroup", Nil, False)
                 (st(st1.stack, InColumnGroup, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True)
               }
             elif name == "caption" then
-              (start-tag(st0, name, attrs, selfClosing), False)
+              (start-tag(clear-back-to-table-context(st0), name, attrs, selfClosing), False)
             elif name == "template" then
               (start-tag(st0, name, attrs, selfClosing), False)
             elif name == "select" then
@@ -2784,16 +2840,22 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
                   (start-tag(st1, name, attrs, selfClosing), False)
               }
             elif is-table-section(name) then
-              { val st1 = start-tag(st0, name, attrs, selfClosing); (st(st1.stack, InTableBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False) }
+              {
+                val stc = clear-back-to-table-context(st0)
+                val st1 = start-tag(stc, name, attrs, selfClosing)
+                (st(st1.stack, InTableBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False)
+              }
             elif name == "tr" then
               {
-                val st1 = ensure-tbody(st0)
+                val stc = clear-back-to-table-context(st0)
+                val st1 = ensure-tbody(stc)
                 val st2 = start-tag(st(st1.stack, InTableBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), name, attrs, selfClosing)
                 (st(st2.stack, InRow, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors), False)
               }
             elif is-table-cell(name) then
               {
-                val st1 = add-error(st0)
+                val stc = clear-back-to-table-context(st0)
+                val st1 = add-error(stc)
                 val st2 = ensure-tbody(st1)
                 val st3 = ensure-tr(st2)
                 val st4 = start-tag(st(st3.stack, InRow, st3.html-inserted, st3.head-inserted, st3.body-inserted, st3.errors), name, attrs, selfClosing)
@@ -3605,8 +3667,7 @@ fun fragment-initial-mode(fragCtx: fragmentcontext) : <div,exn> mode
             elif tag == "td" || tag == "th" then InCell
             elif tag == "colgroup" then InColumnGroup
             elif tag == "table" then InTable
-            // Missing fine-grained modes (e.g. InCaption) fall back to table.
-            elif tag == "caption" then InTable
+            elif tag == "caption" then InCaption
             else InBody
           _ -> InBody
       }
