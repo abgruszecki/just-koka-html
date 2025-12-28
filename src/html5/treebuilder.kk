@@ -1841,10 +1841,33 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
                       }
                     else
                       Cons(add-child(parent, node), rest)
+                  FElFoster(parentName, _pns, _pattrs) ->
+                    if lower-ascii-string(parentName) == "table" then
+                      {
+                        val stack1 = Cons(parent, rest)
+                        match foster-stack(stack1, node)
+                          Just(stack2) -> stack2
+                          Nothing -> Cons(add-child(parent, node), rest)
+                      }
+                    else
+                      Cons(add-child(parent, node), rest)
                   _ -> Cons(add-child(parent, node), rest)
               }
             else
               pop-to-select-foster(Cons(add-child(parent, close-frame(top)), rest))
+          FElFoster(elname, _ns, _attrs) ->
+            {
+              val node = close-frame(top)
+              val tail = Cons(parent, rest)
+              if lower-ascii-string(elname) == "select" then
+                match foster-insert-anywhere(tail, node)
+                  Just(stack2) -> stack2
+                  Nothing -> Cons(add-child(parent, node), rest)
+              else
+                match foster-insert-anywhere(tail, node)
+                  Just(stack2) -> pop-to-select-foster(stack2)
+                  Nothing -> pop-to-select-foster(Cons(add-child(parent, node), rest))
+            }
           _ -> stack0
       _ -> stack0
 
@@ -2729,7 +2752,15 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
             elif name == "template" then
               (start-tag(st0, name, attrs, selfClosing), False)
             elif name == "select" then
-              (start-tag(add-error(st0), name, attrs, selfClosing), False)
+              {
+                // Like other non-table tags in table contexts, <select> is foster-parented.
+                // (The special "select-in-table" close-on-table-structure behavior is handled above.)
+                val st1 = add-error(st0)
+                if foster-needed(st1.stack) then
+                  (start-tag-foster(st1, name, attrs, selfClosing), False)
+                else
+                  (start-tag(st1, name, attrs, selfClosing), False)
+              }
             elif is-table-section(name) then
               { val st1 = start-tag(st0, name, attrs, selfClosing); (st(st1.stack, InTableBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False) }
             elif name == "tr" then
@@ -2958,53 +2989,73 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
               (start-tag(st0, name, attrs, selfClosing), False)
             else
               {
-                val (curNm0, curNs0, _curAttrs) = current-element(st0.stack)
-                val inIntegration =
-                  match curNs0
-                    Svg -> is-svg-html-integration-point(curNm0)
-                    Math -> is-math-text-integration-point(lower-ascii-string(curNm0))
-                    _ -> False
-                val noTable = !has-open(st0.stack, "table")
-                val isTableStruct =
-                  (name == "td" || name == "th" || name == "tr" || is-table-section(name) || name == "table"
-                    || name == "caption" || name == "col" || name == "colgroup")
-
-                if inIntegration && noTable && isTableStruct then
-                  (add-error(st0), False)
-                elif name == "caption" then
+                if has-open(st0.stack, "select")
+                     && (name == "tr" || is-table-section(name) || is-table-cell(name) || name == "caption" || name == "col" || name == "colgroup" || name == "table") then
                   {
-                    // Pop the table body element so `<caption>` becomes a direct child of `<table>`.
-                    val st1 = close-row(st0)
-                    val st2 =
-                      if has-open(st1.stack, "tbody") then end-tag(st1, "tbody")
-                      elif has-open(st1.stack, "thead") then end-tag(st1, "thead")
-                      elif has-open(st1.stack, "tfoot") then end-tag(st1, "tfoot")
-                      else st1
-                    (st(st2.stack, InTable, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors), True)
+                    // In select-in-table contexts, close the <select> (foster-parented) before processing table-structure tokens.
+                    val stack1 = pop-to-select-foster(st0.stack)
+                    val st1 = st(stack1, InTableBody, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors)
+                    (st1, True)
                   }
-                elif name == "tr" then
-                  { val st1 = start-tag(st0, name, attrs, selfClosing); (st(st1.stack, InRow, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False) }
-                elif is-table-cell(name) then
-                  {
-                    val st1 = add-error(st0)
-                    val st2 = ensure-tr(st1)
-                    val st3 = start-tag(st(st2.stack, InRow, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors), name, attrs, selfClosing)
-                    (st(st3.stack, InCell, st3.html-inserted, st3.head-inserted, st3.body-inserted, st3.errors), False)
-                  }
-                elif is-table-section(name) then
-                  {
-                    val st1 = close-row(st0)
-                    val st2 = end-tag(st1, name)
-                    (st(st2.stack, InTable, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors), True)
-                  }
-                elif name == "table" then
-                  { val st1 = add-error(st0); (st(st1.stack, InTable, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True) }
                 else
                   {
-                    // In table-body contexts, foreign tags are parse errors but should still be inserted.
-                    val ns0 = element-ns(st0.stack, name)
-                    val st1 = if is-html-ns(ns0) then st0 else add-error(st0)
-                    (start-tag(st1, name, attrs, selfClosing), False)
+                    val (curNm0, curNs0, _curAttrs) = current-element(st0.stack)
+                    val inIntegration =
+                      match curNs0
+                        Svg -> is-svg-html-integration-point(curNm0)
+                        Math -> is-math-text-integration-point(lower-ascii-string(curNm0))
+                        _ -> False
+                    val noTable = !has-open(st0.stack, "table")
+                    val isTableStruct =
+                      (name == "td" || name == "th" || name == "tr" || is-table-section(name) || name == "table"
+                        || name == "caption" || name == "col" || name == "colgroup")
+
+                    if inIntegration && noTable && isTableStruct then
+                      (add-error(st0), False)
+                    elif name == "select" then
+                      {
+                        val st1 = add-error(st0)
+                        // In table-body contexts, treat <select> like other non-table tags: foster-parent it.
+                        if foster-needed(st1.stack) then
+                          (start-tag-foster(st1, name, attrs, selfClosing), False)
+                        else
+                          (start-tag(st1, name, attrs, selfClosing), False)
+                      }
+                    elif name == "caption" then
+                      {
+                        // Pop the table body element so `<caption>` becomes a direct child of `<table>`.
+                        val st1 = close-row(st0)
+                        val st2 =
+                          if has-open(st1.stack, "tbody") then end-tag(st1, "tbody")
+                          elif has-open(st1.stack, "thead") then end-tag(st1, "thead")
+                          elif has-open(st1.stack, "tfoot") then end-tag(st1, "tfoot")
+                          else st1
+                        (st(st2.stack, InTable, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors), True)
+                      }
+                    elif name == "tr" then
+                      { val st1 = start-tag(st0, name, attrs, selfClosing); (st(st1.stack, InRow, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False) }
+                    elif is-table-cell(name) then
+                      {
+                        val st1 = add-error(st0)
+                        val st2 = ensure-tr(st1)
+                        val st3 = start-tag(st(st2.stack, InRow, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors), name, attrs, selfClosing)
+                        (st(st3.stack, InCell, st3.html-inserted, st3.head-inserted, st3.body-inserted, st3.errors), False)
+                      }
+                    elif is-table-section(name) then
+                      {
+                        val st1 = close-row(st0)
+                        val st2 = end-tag(st1, name)
+                        (st(st2.stack, InTable, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors), True)
+                      }
+                    elif name == "table" then
+                      { val st1 = add-error(st0); (st(st1.stack, InTable, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True) }
+                    else
+                      {
+                        // In table-body contexts, foreign tags are parse errors but should still be inserted.
+                        val ns0 = element-ns(st0.stack, name)
+                        val st1 = if is-html-ns(ns0) then st0 else add-error(st0)
+                        (start-tag(st1, name, attrs, selfClosing), False)
+                      }
                   }
               }
           TokEndTag(name) ->
