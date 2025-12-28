@@ -17,6 +17,10 @@ type fkind {
   FDoc
   FFrag(frag-ctx: maybe<fragmentcontext>)
   FEl(name: string, ns: namespace, attrs: list<attr>)
+  // Marks an element inserted while foster-parenting is enabled (e.g. in table insertion modes).
+  // When such an element closes, it should be inserted into the foster parent (before the nearest open `<table>`),
+  // even if its stack parent is not the table.
+  FElFoster(name: string, ns: namespace, attrs: list<attr>)
   FTemplateContent
 }
 
@@ -60,6 +64,7 @@ struct dstate(
 fun close-frame(fr: frame) : tnode
   match fr.kind
     FEl(name,ns,attrs) -> TEl(name, ns, attrs, fr.children.reverse)
+    FElFoster(name,ns,attrs) -> TEl(name, ns, attrs, fr.children.reverse)
     _ -> TEl("#invalid", Html, Nil, fr.children.reverse)
 
 fun is-void-element(name: string) : bool
@@ -269,6 +274,7 @@ fun current-element(stack0: list<frame>) : <div> (name: string, ns: namespace, a
     Cons(fr, rest) ->
       match fr.kind
         FEl(name, ns, attrs) -> (name, ns, attrs)
+        FElFoster(name, ns, attrs) -> (name, ns, attrs)
         FFrag(mctx) ->
           match mctx
             Just(Fragmentcontext(tag, ns)) -> (tag, ns, Nil)
@@ -697,12 +703,16 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
   fun push-el(st0: dstate, name: string, ns: namespace, attrs: list<attr>) : dstate
     st(Cons(Frame(FEl(name, ns, attrs), Nil), st0.stack), st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors)
 
+  fun push-el-foster(st0: dstate, name: string, ns: namespace, attrs: list<attr>) : dstate
+    st(Cons(Frame(FElFoster(name, ns, attrs), Nil), st0.stack), st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors)
+
   fun has-open(stack0: list<frame>, name: string) : <div,exn> bool
     match stack0
       Nil -> False
       Cons(fr, rest) ->
         match fr.kind
           FEl(elname,_,_) -> if lower-ascii-string(elname) == lower-ascii-string(name) then True else has-open(rest, name)
+          FElFoster(elname,_,_) -> if lower-ascii-string(elname) == lower-ascii-string(name) then True else has-open(rest, name)
           _ -> has-open(rest, name)
 
   fun has-open-html(stack0: list<frame>, name: string) : <div,exn> bool
@@ -711,6 +721,8 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
       Cons(fr, rest) ->
         match fr.kind
           FEl(elname, ns, _) ->
+            if is-html-ns(ns) && lower-ascii-string(elname) == lower-ascii-string(name) then True else has-open-html(rest, name)
+          FElFoster(elname, ns, _) ->
             if is-html-ns(ns) && lower-ascii-string(elname) == lower-ascii-string(name) then True else has-open-html(rest, name)
           _ -> has-open-html(rest, name)
 
@@ -721,6 +733,8 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
         match fr.kind
           FEl(elname, ns, _) ->
             if !is-html-ns(ns) && lower-ascii-string(elname) == lower-ascii-string(name) then True else has-open-foreign-name(rest, name)
+          FElFoster(elname, ns, _) ->
+            if !is-html-ns(ns) && lower-ascii-string(elname) == lower-ascii-string(name) then True else has-open-foreign-name(rest, name)
           _ -> has-open-foreign-name(rest, name)
 
   fun open-element-ns(stack0: list<frame>, name: string) : <div,exn> maybe<namespace>
@@ -730,7 +744,34 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
         match fr.kind
           FEl(elname, ns, _) ->
             if lower-ascii-string(elname) == lower-ascii-string(name) then Just(ns) else open-element-ns(rest, name)
+          FElFoster(elname, ns, _) ->
+            if lower-ascii-string(elname) == lower-ascii-string(name) then Just(ns) else open-element-ns(rest, name)
           _ -> open-element-ns(rest, name)
+
+  fun foster-insert-anywhere(stack0: list<frame>, child: tnode) : <div,exn> maybe<list<frame>>
+    // Insert `child` into the foster parent (the parent of the nearest open `<table>`).
+    match stack0
+      Cons(top, Cons(parent, rest)) ->
+        match top.kind
+          FEl(nm, _ns, _attrs) ->
+            if lower-ascii-string(nm) == "table" then
+              Just(Cons(top, Cons(add-child(parent, child), rest)))
+            else
+              match foster-insert-anywhere(Cons(parent, rest), child)
+                Just(tail) -> Just(Cons(top, tail))
+                Nothing -> Nothing
+          FElFoster(nm, _ns, _attrs) ->
+            if lower-ascii-string(nm) == "table" then
+              Just(Cons(top, Cons(add-child(parent, child), rest)))
+            else
+              match foster-insert-anywhere(Cons(parent, rest), child)
+                Just(tail) -> Just(Cons(top, tail))
+                Nothing -> Nothing
+          _ ->
+            match foster-insert-anywhere(Cons(parent, rest), child)
+              Just(tail) -> Just(Cons(top, tail))
+              Nothing -> Nothing
+      _ -> Nothing
 
   fun pop-to(stack0: list<frame>, name: string) : <div,exn> list<frame>
     match stack0
@@ -756,6 +797,15 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
                         Cons(add-child(parent, node), rest)
                     }
                   _ -> Cons(add-child(parent, node), rest)
+              if lower-ascii-string(elname) == lower-ascii-string(name) then stack1 else pop-to(stack1, name)
+            }
+          FElFoster(elname,_,_) ->
+            {
+              val node = close-frame(top)
+              val stack1 =
+                match foster-insert-anywhere(Cons(parent, rest), node)
+                  Just(stack2) -> stack2
+                  Nothing -> Cons(add-child(parent, node), rest)
               if lower-ascii-string(elname) == lower-ascii-string(name) then stack1 else pop-to(stack1, name)
             }
           _ -> stack0
@@ -786,6 +836,15 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
                     }
                   _ -> Cons(add-child(parent, node), rest)
 
+              if is-html-ns(ns) && lower-ascii-string(elname) == lower-ascii-string(name) then stack1 else pop-to-html(stack1, name)
+            }
+          FElFoster(elname, ns, _) ->
+            {
+              val node = close-frame(top)
+              val stack1 =
+                match foster-insert-anywhere(Cons(parent, rest), node)
+                  Just(stack2) -> stack2
+                  Nothing -> Cons(add-child(parent, node), rest)
               if is-html-ns(ns) && lower-ascii-string(elname) == lower-ascii-string(name) then stack1 else pop-to-html(stack1, name)
             }
           _ -> stack0
@@ -850,6 +909,9 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
           FEl(_nm, ns, _attrs) ->
             if is-html-ns(ns) then stack0
             else pop-foreign-elements(Cons(add-child(parent, close-frame(top)), rest))
+          FElFoster(_nm, ns, _attrs) ->
+            if is-html-ns(ns) then stack0
+            else pop-foreign-elements(Cons(add-child(parent, close-frame(top)), rest))
           // Don't cross non-element sentinels like template-content.
           _ -> stack0
       _ -> stack0
@@ -902,6 +964,13 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
             match fr.kind
               FTemplateContent -> go(rest, True)
               FEl(nm, _ns, _attrs) ->
+                {
+                  val nm1 = lower-ascii-string(nm)
+                  if nm1 == target then sawTemplate
+                  elif nm1 == "template" then go(rest, True)
+                  else go(rest, sawTemplate)
+                }
+              FElFoster(nm, _ns, _attrs) ->
                 {
                   val nm1 = lower-ascii-string(nm)
                   if nm1 == target then sawTemplate
@@ -1021,6 +1090,18 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
                   match fr1.kind
                     FEl(nm1, ns1, _attrs1) ->
                       if same-ns(ns1, ctxNs) && nm1 == ctxName then Cons(fr2, rest) else Cons(fr1, Cons(fr2, rest))
+                    FElFoster(nm1, ns1, _attrs1) ->
+                      if same-ns(ns1, ctxNs) && nm1 == ctxName then Cons(fr2, rest) else Cons(fr1, Cons(fr2, rest))
+                    _ -> Cons(fr1, Cons(fr2, rest))
+                else
+                  Cons(fr1, drop-synthetic-context-before-html(Cons(fr2, rest), mctx))
+              FElFoster(nm2, ns2, _attrs2) ->
+                if is-html-ns(ns2) && nm2 == "html" then
+                  match fr1.kind
+                    FEl(nm1, ns1, _attrs1) ->
+                      if same-ns(ns1, ctxNs) && nm1 == ctxName then Cons(fr2, rest) else Cons(fr1, Cons(fr2, rest))
+                    FElFoster(nm1, ns1, _attrs1) ->
+                      if same-ns(ns1, ctxNs) && nm1 == ctxName then Cons(fr2, rest) else Cons(fr1, Cons(fr2, rest))
                     _ -> Cons(fr1, Cons(fr2, rest))
                 else
                   Cons(fr1, drop-synthetic-context-before-html(Cons(fr2, rest), mctx))
@@ -1046,6 +1127,8 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
                 match fr.kind
                   FEl(nm, _ns, _attrs) ->
                     if nm == "template" then rest else outside
+                  FElFoster(nm, _ns, _attrs) ->
+                    if nm == "template" then rest else outside
                   _ -> outside
           Nothing -> stack0
       val xs2 = drop-synthetic-context-before-html(xs, frag-context(stack0))
@@ -1054,6 +1137,8 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
         Cons(fr, rest) ->
           match fr.kind
             FEl(name,_,_) ->
+              if is-eof-allowed(name) then has-eof-disallowed(rest) else True
+            FElFoster(name,_,_) ->
               if is-eof-allowed(name) then has-eof-disallowed(rest) else True
             _ -> has-eof-disallowed(rest)
     }
@@ -1157,6 +1242,11 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
               if is-html-ns(ns) && name == target then True
               elif is-scope-boundary(name, ns) then False
               else go(rest)
+            FElFoster(nm, ns, _) ->
+              val name = lower-ascii-string(nm)
+              if is-html-ns(ns) && name == target then True
+              elif is-scope-boundary(name, ns) then False
+              else go(rest)
             _ -> go(rest)
     go(stack0)
 
@@ -1169,6 +1259,12 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
         Cons(fr, rest) ->
           match fr.kind
             FEl(nm, ns, _) ->
+              val name = lower-ascii-string(nm)
+              if is-html-ns(ns) && name == target then True
+              elif is-html-ns(ns) && name == "dl" then False
+              elif is-scope-boundary(name, ns) then False
+              else go(rest)
+            FElFoster(nm, ns, _) ->
               val name = lower-ascii-string(nm)
               if is-html-ns(ns) && name == target then True
               elif is-html-ns(ns) && name == "dl" then False
@@ -1190,6 +1286,12 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
               elif is-html-ns(ns) && name == "button" then False
               elif is-scope-boundary(name, ns) then False
               else go(rest)
+            FElFoster(nm, ns, _) ->
+              val name = lower-ascii-string(nm)
+              if is-html-ns(ns) && name == target then True
+              elif is-html-ns(ns) && name == "button" then False
+              elif is-scope-boundary(name, ns) then False
+              else go(rest)
             _ -> go(rest)
     go(stack0)
 
@@ -1202,6 +1304,13 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
         Cons(fr, rest) ->
           match fr.kind
             FEl(nm, ns, _) ->
+              if !is-html-ns(ns) then False
+              else
+                val name = lower-ascii-string(nm)
+                if name == target then True
+                elif name == "td" || name == "th" then False
+                else go(rest)
+            FElFoster(nm, ns, _) ->
               if !is-html-ns(ns) then False
               else
                 val name = lower-ascii-string(nm)
@@ -1669,6 +1778,46 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
     match foster-stack(st0.stack, child)
       Just(stack1) -> st(stack1, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors)
       Nothing -> append(st0, child)
+
+  fun start-tag-foster(st0: dstate, rawName: string, attrs: list<attr>, selfClosing: bool) : <div,exn> dstate
+    // Like `start-tag`, but the produced element node is considered foster-parented.
+    // Called from table insertion modes when `foster-needed(st.stack)` is true.
+    {
+      val rawLower = lower-ascii-string(rawName)
+      val (curName, curNs, _curAttrs) = current-element(st0.stack)
+
+      fun is-integration-point(ns: namespace, name: string) : bool
+        match ns
+          Svg -> is-svg-html-integration-point(name)
+          Math -> is-math-text-integration-point(name)
+          _ -> False
+
+      val stx =
+        if !is-html-ns(curNs) && !is-integration-point(curNs, curName) && is-foreign-breakout-element(rawLower) then
+          {
+            val st1 = st(st0.stack, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors + 1)
+            val stack1 = pop-foreign-elements(st1.stack)
+            st(stack1, st1.imode, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors)
+          }
+        else st0
+
+      val ns0 = element-ns(stx.stack, rawLower)
+      val ns = ns0
+      val name = adjust-tag-name(ns, rawLower)
+      val attrs1 = adjust-attrs(ns, attrs)
+
+      // Templates still create template-content frames; don't mark them fostered.
+      if (is-html-ns(ns) && name == "template" && !selfClosing) then
+        start-tag(stx, rawName, attrs, selfClosing)
+      elif selfClosing || (is-html-ns(ns) && is-void-element(name)) then
+        {
+          // Void/self-closing foster-parented elements are inserted immediately.
+          val node = TEl(name, ns, attrs1, Nil)
+          foster-append(stx, node)
+        }
+      else
+        push-el-foster(stx, name, ns, attrs1)
+    }
 
   fun pop-to-select-foster(stack0: list<frame>) : <div,exn> list<frame>
     // Close elements until <select>, but when closing the <select> itself, foster-parent it (so it ends up
@@ -2628,8 +2777,13 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
             else
               {
                 // In table contexts, most non-table start tags trigger foster parenting and count as a parse error.
-                val st1 = if foster-needed(st0.stack) then add-error(st0) else st0
-                (start-tag(st1, name, attrs, selfClosing), False)
+                if foster-needed(st0.stack) then
+                  {
+                    val st1 = add-error(st0)
+                    (start-tag-foster(st1, name, attrs, selfClosing), False)
+                  }
+                else
+                  (start-tag(st0, name, attrs, selfClosing), False)
               }
           TokEndTag(name) ->
             if in-template-content(st0.stack) then
@@ -3254,6 +3408,32 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
                       else
                         close-all(Cons(add-child(parent2, close-frame(top)), rest2))
                     }
+                  (FEl(topName, _topNs, _topAttrs), FElFoster(parentName, _pns, _pattrs)) ->
+                    {
+                      val p = lower-ascii-string(parentName)
+                      val t = lower-ascii-string(topName)
+                      fun is-table-child(name: string) : bool
+                        name == "caption" || name == "colgroup" || name == "tbody" || name == "thead" || name == "tfoot"
+                          || name == "style" || name == "script"
+
+                      if p == "table" && !is-table-child(t) then
+                        {
+                          val node = close-frame(top)
+                          val stack1 = Cons(parent2, rest2)
+                          match foster-stack(stack1, node)
+                            Just(stack2) -> close-all(stack2)
+                            Nothing -> close-all(Cons(add-child(parent2, node), rest2))
+                        }
+                      else
+                        close-all(Cons(add-child(parent2, close-frame(top)), rest2))
+                    }
+                  (FElFoster(_topName, _topNs, _topAttrs), _parentKind) ->
+                    {
+                      val node = close-frame(top)
+                      match foster-insert-anywhere(Cons(parent2, rest2), node)
+                        Just(stack2) -> close-all(stack2)
+                        Nothing -> close-all(Cons(add-child(parent2, node), rest2))
+                    }
                   _ -> close-all(Cons(add-child(parent2, close-frame(top)), rest2))
               _ -> stack0
       Cons(top, Cons(parent, rest)) ->
@@ -3277,6 +3457,32 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
                 }
               else
                 close-all(Cons(add-child(parent, close-frame(top)), rest))
+            }
+          (FEl(topName, _topNs, _topAttrs), FElFoster(parentName, _pns, _pattrs)) ->
+            {
+              val p = lower-ascii-string(parentName)
+              val t = lower-ascii-string(topName)
+              fun is-table-child(name: string) : bool
+                name == "caption" || name == "colgroup" || name == "tbody" || name == "thead" || name == "tfoot"
+                  || name == "style" || name == "script"
+
+              if p == "table" && !is-table-child(t) then
+                {
+                  val node = close-frame(top)
+                  val stack1 = Cons(parent, rest)
+                  match foster-stack(stack1, node)
+                    Just(stack2) -> close-all(stack2)
+                    Nothing -> close-all(Cons(add-child(parent, node), rest))
+                }
+              else
+                close-all(Cons(add-child(parent, close-frame(top)), rest))
+            }
+          (FElFoster(_topName, _topNs, _topAttrs), _parentKind) ->
+            {
+              val node = close-frame(top)
+              match foster-insert-anywhere(Cons(parent, rest), node)
+                Just(stack2) -> close-all(stack2)
+                Nothing -> close-all(Cons(add-child(parent, node), rest))
             }
           _ -> close-all(Cons(add-child(parent, close-frame(top)), rest))
       _ -> stack0
