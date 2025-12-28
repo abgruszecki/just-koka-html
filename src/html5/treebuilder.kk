@@ -16,23 +16,13 @@ type tnode {
   TDoctype(dt: doctype)
 }
 
-type fkind {
-  FDoc
-  FFrag(frag-ctx: maybe<fragmentcontext>)
-  FEl(name: string, ns: namespace, attrs: list<attr>)
-  // Marks an element inserted while foster-parenting is enabled (e.g. in table insertion modes).
-  // When such an element closes, it should be inserted into the foster parent (before the nearest open `<table>`),
-  // even if its stack parent is not the table.
-  FElFoster(name: string, ns: namespace, attrs: list<attr>)
-  FTemplateContent
-}
-
 type mode {
   Initial
   BeforeHtml
   BeforeHead
   InHead
   InHeadNoscript
+  InTemplate
   AfterHead
   InBody
   InFrameset
@@ -46,6 +36,18 @@ type mode {
   InCell
   AfterBody
   AfterAfterBody
+}
+
+type fkind {
+  FDoc
+  FFrag(frag-ctx: maybe<fragmentcontext>)
+  FEl(name: string, ns: namespace, attrs: list<attr>)
+  // Marks an element inserted while foster-parenting is enabled (e.g. in table insertion modes).
+  // When such an element closes, it should be inserted into the foster parent (before the nearest open `<table>`),
+  // even if its stack parent is not the table.
+  FElFoster(name: string, ns: namespace, attrs: list<attr>)
+  // A sentinel stack frame for template parsing; the `tmode` tracks the current insertion mode inside the template.
+  FTemplateContent(tmode: mode)
 }
 
 type fmtentry {
@@ -446,7 +448,7 @@ fun build-tree(tokens: list<token>, initial: frame) : <div,exn> (children: list<
     match stack
       Cons(contentFr, Cons(tplFr, Cons(parent, rest))) ->
         match (contentFr.kind, tplFr.kind)
-          (FTemplateContent, FEl(name, ns, attrs)) ->
+          (FTemplateContent(_), FEl(name, ns, attrs)) ->
             if lower-ascii-string(name) == "template" then
               {
                 val node = TTemplate(ns, attrs, contentFr.children.reverse)
@@ -492,7 +494,7 @@ fun build-tree(tokens: list<token>, initial: frame) : <div,exn> (children: list<
               val adjName = adjName0
               val attrs1 = adjust-attrs(ns, attrs)
               if (is-html-ns(ns) && adjName == "template" && !selfClosing) then
-                { push(FEl("template", Html, attrs1)); push(FTemplateContent) }
+                { push(FEl("template", Html, attrs1)); push(FTemplateContent(InTemplate)) }
               elif selfClosing || (is-html-ns(ns) && is-void-element(adjName)) then
                 append(TEl(adjName, ns, attrs1, Nil))
               else if (is-html-ns(ns) && adjName == "p" && has-open(stack, "p")) then
@@ -527,7 +529,7 @@ fun build-tree(tokens: list<token>, initial: frame) : <div,exn> (children: list<
     match stack
       Cons(contentFr, Cons(tplFr, Cons(parent, rest))) ->
         match (contentFr.kind, tplFr.kind)
-          (FTemplateContent, FEl(name, ns, attrs)) ->
+          (FTemplateContent(_), FEl(name, ns, attrs)) ->
             if lower-ascii-string(name) == "template" then
               stack := Cons(add-child(parent, TTemplate(ns, attrs, contentFr.children.reverse)), rest)
             else
@@ -558,7 +560,18 @@ fun run-treebuilder(tokens: list<tokenizer/tokenloc>, st0: dstate, scriptingEnab
       _ -> Frame(fr.kind, Cons(child, fr.children))
 
   fun st(stack: list<frame>, imode: mode, html: bool, head: bool, body: bool, errors: int, errlist: list<parseerror>, line: int, col: int) : dstate
-    Dstate(stack, imode, html, head, body, Nil, errors, errlist, line, col)
+    {
+      // Keep the nearest template-content sentinel's `tmode` in sync with the current insertion mode.
+      fun sync-template-mode(stack0: list<frame>) : list<frame>
+        match stack0
+          Nil -> Nil
+          Cons(fr, rest) ->
+            match fr.kind
+              FTemplateContent(_old) -> Cons(Frame(FTemplateContent(imode), fr.children), rest)
+              _ -> Cons(fr, sync-template-mode(rest))
+
+      Dstate(sync-template-mode(stack), imode, html, head, body, Nil, errors, errlist, line, col)
+    }
 
   fun add-error-code(st0: dstate, code: string) : dstate
     val pe = errors/parseerror-at(code, st0.tok-line, st0.tok-col)
@@ -995,7 +1008,7 @@ fun run-treebuilder(tokens: list<tokenizer/tokenloc>, st0: dstate, scriptingEnab
     match stack1
       Cons(contentFr, Cons(tplFr, Cons(parent, rest))) ->
         match (contentFr.kind, tplFr.kind)
-          (FTemplateContent, FEl(name, ns, attrs)) ->
+          (FTemplateContent(_), FEl(name, ns, attrs)) ->
             if lower-ascii-string(name) == "template" then
               Cons(add-child(parent, TTemplate(ns, attrs, contentFr.children.reverse)), rest)
             else stack1
@@ -1016,6 +1029,14 @@ fun run-treebuilder(tokens: list<tokenizer/tokenloc>, st0: dstate, scriptingEnab
           // Don't cross non-element sentinels like template-content.
           _ -> stack0
       _ -> stack0
+
+  fun in-template-content(stack0: list<frame>) : bool
+    match stack0
+      Nil -> False
+      Cons(fr, rest) ->
+        match fr.kind
+          FTemplateContent(_) -> True
+          _ -> in-template-content(rest)
 
   fun start-tag(st0: dstate, rawName: string, attrs: list<attr>, selfClosing: bool) : <div,exn> dstate
     {
@@ -1042,12 +1063,15 @@ fun run-treebuilder(tokens: list<tokenizer/tokenloc>, st0: dstate, scriptingEnab
       val ns = ns0
       val name = adjust-tag-name(ns, rawLower)
       val attrs1 = adjust-attrs(ns, attrs)
-      if (is-html-ns(ns) && name == "template" && !selfClosing) then
+      if in-template-content(stx.stack) && is-html-ns(ns) && (name == "frame" || name == "frameset") then
+        // html5lib `template.dat`: these tokens are parse errors and are ignored inside template content.
+        add-error(stx)
+      elif (is-html-ns(ns) && name == "template" && !selfClosing) then
         {
           val st1 = push-el(stx, "template", Html, attrs1)
           st(
-            Cons(Frame(FTemplateContent, Nil), st1.stack),
-            st1.imode,
+            Cons(Frame(FTemplateContent(InTemplate), Nil), st1.stack),
+            InTemplate,
             st1.html-inserted,
             st1.head-inserted,
             st1.body-inserted,
@@ -1073,7 +1097,7 @@ fun run-treebuilder(tokens: list<tokenizer/tokenloc>, st0: dstate, scriptingEnab
           Nil -> False
           Cons(fr, rest) ->
             match fr.kind
-              FTemplateContent -> go(rest, True)
+              FTemplateContent(_) -> go(rest, True)
               FEl(nm, _ns, _attrs) ->
                 {
                   val nm1 = lower-ascii-string(nm)
@@ -1257,7 +1281,7 @@ fun run-treebuilder(tokens: list<tokenizer/tokenloc>, st0: dstate, scriptingEnab
           Nil -> Nothing
           Cons(fr, rest) ->
             match fr.kind
-              FTemplateContent -> Just(rest)
+              FTemplateContent(_) -> Just(rest)
               _ -> after-template-content(rest)
 
       // EOF-in-template is counted separately; ignore open elements inside template content.
@@ -1303,7 +1327,7 @@ fun run-treebuilder(tokens: list<tokenizer/tokenloc>, st0: dstate, scriptingEnab
           Nil -> False
           Cons(fr, rest) ->
             match fr.kind
-              FTemplateContent -> True
+              FTemplateContent(_) -> True
               _ -> has-template-content(rest)
 
       val add1 =
@@ -1901,6 +1925,10 @@ fun run-treebuilder(tokens: list<tokenizer/tokenloc>, st0: dstate, scriptingEnab
   fun ensure-tbody(st0: dstate) : <div,exn> dstate
     if has-open-html(st0.stack, "tbody") || has-open-html(st0.stack, "thead") || has-open-html(st0.stack, "tfoot") then
       st0
+    elif !has-open-html(st0.stack, "table") then
+      // In template contexts we can enter table modes without a real <table> element in scope;
+      // don't synthesize a <tbody> in that case (matches html5lib's `template.dat` expectations).
+      st0
     else
       push-el(st0, "tbody", Html, Nil)
 
@@ -2022,14 +2050,6 @@ fun run-treebuilder(tokens: list<tokenizer/tokenloc>, st0: dstate, scriptingEnab
           _ -> stack0
       _ -> stack0
 
-  fun in-template-content(stack0: list<frame>) : bool
-    match stack0
-      Nil -> False
-      Cons(fr, rest) ->
-        match fr.kind
-          FTemplateContent -> True
-          _ -> in-template-content(rest)
-
   fun foster-needed(stack0: list<frame>) : <div,exn> bool
     val (nm, _ns, _attrs) = current-element(stack0)
     val name = lower-ascii-string(nm)
@@ -2048,7 +2068,27 @@ fun run-treebuilder(tokens: list<tokenizer/tokenloc>, st0: dstate, scriptingEnab
     st(st0.stack, m, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors, st0.errlist, st0.tok-line, st0.tok-col)
 
   fun update-mode(st0: dstate) : <div,exn> dstate
-    with-mode(st0, mode-from-stack(st0.stack))
+    {
+      fun template-mode(stack0: list<frame>) : maybe<mode>
+        match stack0
+          Nil -> Nothing
+          Cons(fr, rest) ->
+            match fr.kind
+              FTemplateContent(m) -> Just(m)
+              _ -> template-mode(rest)
+
+      match template-mode(st0.stack)
+        Just(m) -> with-mode(st0, m)
+        Nothing ->
+          {
+            // Outside templates, don't drop head/body context when callers ask to "update" the insertion mode.
+            val m =
+              if has-open(st0.stack, "head") && !has-open(st0.stack, "body") then InHead
+              elif has-open(st0.stack, "body") then InBody
+              else mode-from-stack(st0.stack)
+            with-mode(st0, m)
+          }
+    }
 
   fun process-one(t: token, st0: dstate) : <div,exn> (next: dstate, reprocess: bool)
     fun sanitize-char-token(t0: token, stx: dstate) : <div,exn> (st: dstate, tok: token)
@@ -2343,6 +2383,35 @@ fun run-treebuilder(tokens: list<tokenizer/tokenloc>, st0: dstate, scriptingEnab
           TokEOF ->
             // html5lib: eof-in-head-noscript
             (add-error(st0), False)
+      InTemplate ->
+        match t
+          TokStartTag(name, _attrs, _selfClosing) ->
+            {
+              fun is-headish(nm: string) : bool
+                nm == "base" || nm == "basefont" || nm == "bgsound" || nm == "link" || nm == "meta"
+                  || nm == "noframes" || nm == "script" || nm == "style" || nm == "template" || nm == "title"
+
+              val m =
+                if is-headish(name) then InHead
+                elif name == "table" then InTable
+                elif name == "caption" || name == "colgroup" then InTable
+                elif name == "tbody" || name == "thead" || name == "tfoot" then InTable
+                elif name == "col" then InColumnGroup
+                elif name == "tr" then InTableBody
+                elif name == "td" || name == "th" then InRow
+                else InBody
+              (st(st0.stack, m, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors, st0.errlist, st0.tok-line, st0.tok-col), True)
+            }
+          TokEndTag(name) ->
+            if name == "template" then
+              { val st1 = end-tag(st0, "template"); (update-mode(st1), False) }
+            else
+              // Unexpected end tags in template insertion mode are parse errors and are ignored.
+              (add-error(st0), False)
+          TokEOF -> (add-eof-error(st0), False)
+          _ ->
+            // Everything else is handled using in-body rules.
+            (st(st0.stack, InBody, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors, st0.errlist, st0.tok-line, st0.tok-col), True)
       AfterHead ->
         match t
           TokComment(data) -> (append(st0, TComment(data)), False)
@@ -2676,7 +2745,7 @@ fun run-treebuilder(tokens: list<tokenizer/tokenloc>, st0: dstate, scriptingEnab
                     match st0x.stack
                       Cons(fr, _) ->
                         match fr.kind
-                          FTemplateContent -> (end-tag(st0x, "template"), False)
+                          FTemplateContent(_) -> (end-tag(st0x, "template"), False)
                           _ -> (end-tag(add-error(st0x), "template"), False)
                       _ -> (end-tag(add-error(st0x), "template"), False)
                   elif is-heading-element(name) then
@@ -2903,9 +2972,7 @@ fun run-treebuilder(tokens: list<tokenizer/tokenloc>, st0: dstate, scriptingEnab
       InTable ->
         match t
           TokStartTag(name, attrs, selfClosing) ->
-            if in-template-content(st0.stack) then
-              (start-tag(st0, name, attrs, selfClosing), False)
-            elif has-open(st0.stack, "select")
+            if has-open(st0.stack, "select")
                  && (name == "tr" || is-table-section(name) || is-table-cell(name) || name == "caption" || name == "col" || name == "colgroup") then
               {
                 // In select-in-table contexts, close the <select> (foster-parented) before processing other table-structure tokens.
@@ -3062,7 +3129,7 @@ fun run-treebuilder(tokens: list<tokenizer/tokenloc>, st0: dstate, scriptingEnab
                       match st0.stack
                         Cons(fr, _) ->
                           match fr.kind
-                            FTemplateContent -> st0
+                            FTemplateContent(_) -> st0
                             FEl(topName0, _topNs, _topAttrs) ->
                               {
                                 val topName = lower-ascii-string(topName0)
@@ -3220,92 +3287,83 @@ fun run-treebuilder(tokens: list<tokenizer/tokenloc>, st0: dstate, scriptingEnab
       InTableBody ->
         match t
           TokStartTag(name, attrs, selfClosing) ->
-            if in-template-content(st0.stack) then
-              (start-tag(st0, name, attrs, selfClosing), False)
-            else
-              {
-                if has-open(st0.stack, "select")
-                     && (name == "tr" || is-table-section(name) || is-table-cell(name) || name == "caption" || name == "col" || name == "colgroup" || name == "table") then
-                  {
-                    // In select-in-table contexts, close the <select> (foster-parented) before processing table-structure tokens.
-                    val stack1 = pop-to-select-foster(st0.stack)
-                    val st1 = st(stack1, InTableBody, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors, st0.errlist, st0.tok-line, st0.tok-col)
-                    (st1, True)
-                  }
-                else
-                  {
-                    val (curNm0, curNs0, _curAttrs) = current-element(st0.stack)
-                    val inIntegration =
-                      match curNs0
-                        Svg -> is-svg-html-integration-point(curNm0)
-                        Math -> is-math-text-integration-point(lower-ascii-string(curNm0))
-                        _ -> False
-                    val noTable = !has-open(st0.stack, "table")
-                    val isTableStruct =
-                      (name == "td" || name == "th" || name == "tr" || is-table-section(name) || name == "table"
-                        || name == "caption" || name == "col" || name == "colgroup")
-
-                    if inIntegration && noTable && isTableStruct then
-                      (add-error(st0), False)
-                    elif name == "select" then
-                      {
-                        val st1 = add-error(st0)
-                        // In table-body contexts, treat <select> like other non-table tags: foster-parent it.
-                        if foster-needed(st1.stack) then
-                          (start-tag-foster(st1, name, attrs, selfClosing), False)
-                        else
-                          (start-tag(st1, name, attrs, selfClosing), False)
-                      }
-                    elif name == "caption" then
-                      {
-                        // Pop the table body element so `<caption>` becomes a direct child of `<table>`.
-                        val st1 = close-row(st0)
-                        val st2 =
-                          if has-open(st1.stack, "tbody") then end-tag(st1, "tbody")
-                          elif has-open(st1.stack, "thead") then end-tag(st1, "thead")
-                          elif has-open(st1.stack, "tfoot") then end-tag(st1, "tfoot")
-                          else st1
-                        (st(st2.stack, InTable, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors, st2.errlist, st2.tok-line, st2.tok-col), True)
-                      }
-                    elif name == "tr" then
-                      { val st1 = start-tag(st0, name, attrs, selfClosing); (st(st1.stack, InRow, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col), False) }
-                    elif is-table-cell(name) then
-                      {
-                        val st1 = add-error(st0)
-                        val st2 = ensure-tr(st1)
-                        val st3 =
-                          start-tag(
-                            st(st2.stack, InRow, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors, st2.errlist, st2.tok-line, st2.tok-col),
-                            name,
-                            attrs,
-                            selfClosing
-                          )
-                        (st(st3.stack, InCell, st3.html-inserted, st3.head-inserted, st3.body-inserted, st3.errors, st3.errlist, st3.tok-line, st3.tok-col), False)
-                      }
-                    elif is-table-section(name) then
-                      {
-                        val st1 = close-row(st0)
-                        val st2 = end-tag(st1, name)
-                        (st(st2.stack, InTable, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors, st2.errlist, st2.tok-line, st2.tok-col), True)
-                      }
-                    elif name == "table" then
-                      { val st1 = add-error(st0); (st(st1.stack, InTable, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col), True) }
-                    else
-                      {
-                        // In table-body contexts, foreign tags are parse errors but should still be inserted.
-                        val ns0 = element-ns(st0.stack, name)
-                        val st1 = if is-html-ns(ns0) then st0 else add-error(st0)
-                        (start-tag(st1, name, attrs, selfClosing), False)
-                      }
-                  }
-              }
-          TokEndTag(name) ->
-            if in-template-content(st0.stack) then
-              if has-open(st0.stack, name) then
-                { val st1 = end-tag(st0, name); (update-mode(st1), False) }
+            {
+              if has-open(st0.stack, "select")
+                   && (name == "tr" || is-table-section(name) || is-table-cell(name) || name == "caption" || name == "col" || name == "colgroup" || name == "table") then
+                {
+                  // In select-in-table contexts, close the <select> (foster-parented) before processing table-structure tokens.
+                  val stack1 = pop-to-select-foster(st0.stack)
+                  val st1 = st(stack1, InTableBody, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors, st0.errlist, st0.tok-line, st0.tok-col)
+                  (st1, True)
+                }
               else
-                (add-error(st0), False)
-            elif name == "html" || name == "body" then
+                {
+                  val (curNm0, curNs0, _curAttrs) = current-element(st0.stack)
+                  val inIntegration =
+                    match curNs0
+                      Svg -> is-svg-html-integration-point(curNm0)
+                      Math -> is-math-text-integration-point(lower-ascii-string(curNm0))
+                      _ -> False
+                  val noTable = !has-open(st0.stack, "table")
+                  val isTableStruct =
+                    (name == "td" || name == "th" || name == "tr" || is-table-section(name) || name == "table"
+                      || name == "caption" || name == "col" || name == "colgroup")
+
+                  if inIntegration && noTable && isTableStruct then
+                    (add-error(st0), False)
+                  elif name == "select" then
+                    {
+                      val st1 = add-error(st0)
+                      // In table-body contexts, treat <select> like other non-table tags: foster-parent it.
+                      if foster-needed(st1.stack) then
+                        (start-tag-foster(st1, name, attrs, selfClosing), False)
+                      else
+                        (start-tag(st1, name, attrs, selfClosing), False)
+                    }
+                  elif name == "caption" then
+                    {
+                      // Pop the table body element so `<caption>` becomes a direct child of `<table>`.
+                      val st1 = close-row(st0)
+                      val st2 =
+                        if has-open(st1.stack, "tbody") then end-tag(st1, "tbody")
+                        elif has-open(st1.stack, "thead") then end-tag(st1, "thead")
+                        elif has-open(st1.stack, "tfoot") then end-tag(st1, "tfoot")
+                        else st1
+                      (st(st2.stack, InTable, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors, st2.errlist, st2.tok-line, st2.tok-col), True)
+                    }
+                  elif name == "tr" then
+                    { val st1 = start-tag(st0, name, attrs, selfClosing); (st(st1.stack, InRow, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col), False) }
+                  elif is-table-cell(name) then
+                    {
+                      val st1 = add-error(st0)
+                      val st2 = ensure-tr(st1)
+                      val st3 =
+                        start-tag(
+                          st(st2.stack, InRow, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors, st2.errlist, st2.tok-line, st2.tok-col),
+                          name,
+                          attrs,
+                          selfClosing
+                        )
+                      (st(st3.stack, InCell, st3.html-inserted, st3.head-inserted, st3.body-inserted, st3.errors, st3.errlist, st3.tok-line, st3.tok-col), False)
+                    }
+                  elif is-table-section(name) then
+                    {
+                      val st1 = close-row(st0)
+                      val st2 = end-tag(st1, name)
+                      (st(st2.stack, InTable, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors, st2.errlist, st2.tok-line, st2.tok-col), True)
+                    }
+                  elif name == "table" then
+                    { val st1 = add-error(st0); (st(st1.stack, InTable, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col), True) }
+                  else
+                    {
+                      // In table-body contexts, non-table tags are parse errors and are handled using in-table rules.
+                      val st1 = add-error(st0)
+                      (st(st1.stack, InTable, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col), True)
+                    }
+                }
+            }
+          TokEndTag(name) ->
+            if name == "html" || name == "body" then
               (add-error(st0), False)
             elif is-table-section(name) then
               if has-open(st0.stack, name) then
@@ -3347,21 +3405,14 @@ fun run-treebuilder(tokens: list<tokenizer/tokenloc>, st0: dstate, scriptingEnab
       InColumnGroup ->
         match t
           TokStartTag(name, attrs, selfClosing) ->
-            if in-template-content(st0.stack) then
-              (start-tag(st0, name, attrs, selfClosing), False)
-            elif name == "col" then
+            if name == "col" then
               (start-tag(st0, name, attrs, selfClosing), False)
             elif name == "template" then
               (start-tag(st0, name, attrs, selfClosing), False)
             else
               { val st1 = add-error(st0); val st2 = end-tag(st1, "colgroup"); (st(st2.stack, InTable, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors, st2.errlist, st2.tok-line, st2.tok-col), True) }
           TokEndTag(name) ->
-            if in-template-content(st0.stack) then
-              if has-open(st0.stack, name) then
-                { val st1 = end-tag(st0, name); (update-mode(st1), False) }
-              else
-                (add-error(st0), False)
-            elif name == "html" || name == "body" then
+            if name == "html" || name == "body" then
               // Don't allow these end tags to close the actual <html>/<body> element from inside table modes.
               (add-error(st0), False)
             elif name == "colgroup" then
@@ -3388,78 +3439,81 @@ fun run-treebuilder(tokens: list<tokenizer/tokenloc>, st0: dstate, scriptingEnab
       InRow ->
         match t
           TokStartTag(name, attrs, selfClosing) ->
-            if in-template-content(st0.stack) then
-              (start-tag(st0, name, attrs, selfClosing), False)
-            else
-              {
-                if has-open(st0.stack, "select")
-                     && (name == "tr" || is-table-section(name) || is-table-cell(name) || name == "caption" || name == "col" || name == "colgroup" || name == "table") then
-                  {
-                    // In select-in-table contexts, close the <select> (foster-parented) before processing table-structure tokens.
-                    val stack1 = pop-to-select-foster(st0.stack)
-                    val st1 = st(stack1, InRow, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors, st0.errlist, st0.tok-line, st0.tok-col)
-                    (st1, True)
-                  }
-                elif name == "select" then
-                  {
-                    val st1 = add-error(st0)
-                    if foster-needed(st1.stack) then
-                      (start-tag-foster(st1, name, attrs, selfClosing), False)
-                    else
-                      (start-tag(st1, name, attrs, selfClosing), False)
-                  }
-                else
-                  {
-                    val (curNm0, curNs0, _curAttrs) = current-element(st0.stack)
-                    val inIntegration =
-                      match curNs0
-                        Svg -> is-svg-html-integration-point(curNm0)
-                        Math -> is-math-text-integration-point(lower-ascii-string(curNm0))
-                        _ -> False
-                    val noTable = !has-open(st0.stack, "table")
-                    val isTableStruct =
-                      (name == "td" || name == "th" || name == "tr" || is-table-section(name) || name == "table"
-                        || name == "caption" || name == "col" || name == "colgroup")
+            {
+              if has-open(st0.stack, "select")
+                   && (name == "tr" || is-table-section(name) || is-table-cell(name) || name == "caption" || name == "col" || name == "colgroup" || name == "table") then
+                {
+                  // In select-in-table contexts, close the <select> (foster-parented) before processing table-structure tokens.
+                  val stack1 = pop-to-select-foster(st0.stack)
+                  val st1 = st(stack1, InRow, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors, st0.errlist, st0.tok-line, st0.tok-col)
+                  (st1, True)
+                }
+              elif name == "select" then
+                {
+                  val st1 = add-error(st0)
+                  if foster-needed(st1.stack) then
+                    (start-tag-foster(st1, name, attrs, selfClosing), False)
+                  else
+                    (start-tag(st1, name, attrs, selfClosing), False)
+                }
+              else
+                {
+                  val (curNm0, curNs0, _curAttrs) = current-element(st0.stack)
+                  val inIntegration =
+                    match curNs0
+                      Svg -> is-svg-html-integration-point(curNm0)
+                      Math -> is-math-text-integration-point(lower-ascii-string(curNm0))
+                      _ -> False
+                  val noTable = !has-open(st0.stack, "table")
+                  val isTableStruct =
+                    (name == "td" || name == "th" || name == "tr" || is-table-section(name) || name == "table"
+                      || name == "caption" || name == "col" || name == "colgroup")
 
-                    if inIntegration && noTable && isTableStruct then
-                      // Approximate "table mode without a table in scope": ignore table-structure tags here.
-                      (add-error(st0), False)
-                    elif is-table-cell(name) then
-                      { val st1 = start-tag(st0, name, attrs, selfClosing); (st(st1.stack, InCell, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col), False) }
-                    elif name == "caption" then
-                      {
-                        // Close the current row and let table-body mode place `<caption>` correctly.
-                        val st1 = end-tag(st0, "tr")
-                        (st(st1.stack, InTableBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col), True)
-                      }
-                    elif name == "tr" then
-                      {
-                        // Close the current row before starting a new one.
-                        val st1 = end-tag(st0, "tr")
-                        (st(st1.stack, InTableBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col), True)
-                      }
+                  if inIntegration && noTable && isTableStruct then
+                    // Approximate "table mode without a table in scope": ignore table-structure tags here.
+                    (add-error(st0), False)
+                  elif is-table-cell(name) then
+                    { val st1 = start-tag(st0, name, attrs, selfClosing); (st(st1.stack, InCell, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col), False) }
+                  elif name == "caption" then
+                    {
+                      // Close the current row and let table-body mode place `<caption>` correctly.
+                      val st1 = end-tag(st0, "tr")
+                      (st(st1.stack, InTableBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col), True)
+                    }
+                  elif name == "tr" then
+                    {
+                      // Close the current row before starting a new one.
+                      val st1 = end-tag(st0, "tr")
+                      (st(st1.stack, InTableBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col), True)
+                    }
                     elif is-table-section(name) || name == "table" then
+                    if in-template-content(st0.stack) && !has-open(st0.stack, "table") then
+                      // `template.dat`: ignore table-section/table tokens when there's no actual <table> in scope.
+                      (add-error(st0), False)
+                    else
                       {
                         val st1 = add-error(st0)
                         val st2 = end-tag(st1, "tr")
                         (st(st2.stack, InTableBody, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors, st2.errlist, st2.tok-line, st2.tok-col), True)
                       }
-                    else
-                      {
-                        // In row contexts, foreign start tags (like <svg>/<math>) are parse errors but still inserted.
-                        val ns0 = element-ns(st0.stack, name)
-                        val st1 = if is-html-ns(ns0) then st0 else add-error(st0)
-                        (start-tag(st1, name, attrs, selfClosing), False)
-                      }
-                  }
-              }
+                  else
+                    {
+                      // Anything else: parse error; handle as if in-table.
+                      val st1 = add-error(st0)
+                      // In template content, we may be in a row context without any real <table> in scope.
+                      // html5lib's `template.dat` expects the offending token to end up *outside* the <tr>,
+                      // so close the row first in that specific situation.
+                      val st2 =
+                        if in-template-content(st1.stack) && !has-open(st1.stack, "table") && has-open(st1.stack, "tr") then
+                          end-tag(st1, "tr")
+                        else
+                          st1
+                      (st(st2.stack, InTable, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors, st2.errlist, st2.tok-line, st2.tok-col), True)
+                    }
+                }
+            }
           TokEndTag(name) ->
-            if in-template-content(st0.stack) then
-              if has-open(st0.stack, name) then
-                { val st1 = end-tag(st0, name); (update-mode(st1), False) }
-              else
-                (add-error(st0), False)
-            elif name == "html" || name == "body" then
+            if name == "html" || name == "body" then
               (add-error(st0), False)
             elif name == "tr" then
               { val st1 = end-tag(st0, "tr"); (st(st1.stack, InTableBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col), False) }
@@ -3485,12 +3539,7 @@ fun run-treebuilder(tokens: list<tokenizer/tokenloc>, st0: dstate, scriptingEnab
       InCell ->
         match t
           TokEndTag(name) ->
-            if in-template-content(st0.stack) then
-              if has-open(st0.stack, name) then
-                { val st1 = end-tag(st0, name); (update-mode(st1), False) }
-              else
-                (add-error(st0), False)
-            elif name == "html" || name == "body" then
+            if name == "html" || name == "body" then
               (add-error(st0), False)
             elif is-table-cell(name) then
               if has-open-html(st0.stack, name) then
@@ -3528,10 +3577,7 @@ fun run-treebuilder(tokens: list<tokenizer/tokenloc>, st0: dstate, scriptingEnab
               else
                 (add-error(st0), False)
           TokStartTag(name, attrs, selfClosing) ->
-            if in-template-content(st0.stack) then
-              (start-tag(st0, name, attrs, selfClosing), False)
-            else
-              {
+            {
                 // When parsing HTML tokens at an SVG/MathML integration point, html5lib behaves
                 // like the spec: table-mode tokens should be handled as "in body" when there's
                 // no <table> in scope. Our simplified model doesn't track table scope, so we
@@ -3580,7 +3626,7 @@ fun run-treebuilder(tokens: list<tokenizer/tokenloc>, st0: dstate, scriptingEnab
                   }
                 else
                   (start-tag(st0, name, attrs, selfClosing), False)
-              }
+            }
           TokCharacter(s) ->
             if s == "" then (st0, False) else (append(st0, TText(s)), False)
           TokComment(data) -> (append(st0, TComment(data)), False)
@@ -3692,7 +3738,7 @@ fun run-treebuilder(tokens: list<tokenizer/tokenloc>, st0: dstate, scriptingEnab
     match stack0
       Cons(contentFr, Cons(tplFr, Cons(parent, rest))) ->
         match (contentFr.kind, tplFr.kind)
-          (FTemplateContent, FEl(name, ns, attrs)) ->
+          (FTemplateContent(_), FEl(name, ns, attrs)) ->
             if lower-ascii-string(name) == "template" then
               close-all(Cons(add-child(parent, TTemplate(ns, attrs, contentFr.children.reverse)), rest))
             else
@@ -3914,14 +3960,14 @@ pub fun build-fragment(tokens: list<tokenizer/tokenloc>, fragCtx: fragmentcontex
             Cons(htmlFrame, Cons(rootFrame, Nil))
           elif is-html-ns(ctxNs) && tag == "template" then
             // Parse inside a template's content fragment.
-            Cons(Frame(FTemplateContent, Nil), Cons(Frame(FEl("template", Html, Nil), Nil), Cons(htmlFrame, Cons(rootFrame, Nil))))
+            Cons(Frame(FTemplateContent(InTemplate), Nil), Cons(Frame(FEl("template", Html, Nil), Nil), Cons(htmlFrame, Cons(rootFrame, Nil))))
           else
             {
               val ctxName = adjust-tag-name(ctxNs, tag)
               Cons(Frame(FEl(ctxName, ctxNs, Nil), Nil), Cons(htmlFrame, Cons(rootFrame, Nil)))
             }
 
-        val st0 = Dstate(stack0, fragment-initial-mode(fragCtx), True, False, False, Nil, 0, Nil, 1, 1)
+        val st0 = Dstate(stack0, if tag == "template" then InTemplate else fragment-initial-mode(fragCtx), True, False, False, Nil, 0, Nil, 1, 1)
         val (children0, errs) = run-treebuilder(tokens, st0, scriptingEnabled, False)
         val children = cleanup-fragment-wrappers(children0, fragCtx)
         (arena-from-children(DocumentFragment(Nil, Just(fragCtx)), children), errs)
