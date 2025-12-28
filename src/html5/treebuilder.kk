@@ -705,6 +705,24 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
           FEl(elname,_,_) -> if lower-ascii-string(elname) == lower-ascii-string(name) then True else has-open(rest, name)
           _ -> has-open(rest, name)
 
+  fun has-open-html(stack0: list<frame>, name: string) : <div,exn> bool
+    match stack0
+      Nil -> False
+      Cons(fr, rest) ->
+        match fr.kind
+          FEl(elname, ns, _) ->
+            if is-html-ns(ns) && lower-ascii-string(elname) == lower-ascii-string(name) then True else has-open-html(rest, name)
+          _ -> has-open-html(rest, name)
+
+  fun has-open-foreign-name(stack0: list<frame>, name: string) : <div,exn> bool
+    match stack0
+      Nil -> False
+      Cons(fr, rest) ->
+        match fr.kind
+          FEl(elname, ns, _) ->
+            if !is-html-ns(ns) && lower-ascii-string(elname) == lower-ascii-string(name) then True else has-open-foreign-name(rest, name)
+          _ -> has-open-foreign-name(rest, name)
+
   fun open-element-ns(stack0: list<frame>, name: string) : <div,exn> maybe<namespace>
     match stack0
       Nil -> Nothing
@@ -739,6 +757,36 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
                     }
                   _ -> Cons(add-child(parent, node), rest)
               if lower-ascii-string(elname) == lower-ascii-string(name) then stack1 else pop-to(stack1, name)
+            }
+          _ -> stack0
+      _ -> stack0
+
+  fun pop-to-html(stack0: list<frame>, name: string) : <div,exn> list<frame>
+    match stack0
+      Cons(top, Cons(parent, rest)) ->
+        match top.kind
+          FEl(elname, ns, _) ->
+            {
+              val node = close-frame(top)
+              val topLow = lower-ascii-string(elname)
+              val stack1 =
+                match parent.kind
+                  FEl(parentName, _pns, _pattrs) ->
+                    {
+                      val p = lower-ascii-string(parentName)
+                      val isTableChild =
+                        topLow == "caption" || topLow == "colgroup" || topLow == "tbody" || topLow == "thead" || topLow == "tfoot"
+                          || topLow == "style" || topLow == "script"
+                      if p == "table" && !isTableChild then
+                        match rest
+                          Cons(tblParent, rest2) -> Cons(parent, Cons(add-child(tblParent, node), rest2))
+                          _ -> Cons(add-child(parent, node), rest)
+                      else
+                        Cons(add-child(parent, node), rest)
+                    }
+                  _ -> Cons(add-child(parent, node), rest)
+
+              if is-html-ns(ns) && lower-ascii-string(elname) == lower-ascii-string(name) then stack1 else pop-to-html(stack1, name)
             }
           _ -> stack0
       _ -> stack0
@@ -1578,27 +1626,27 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
       Cons(t, rest) -> if has-open(stack0, t) then True else has-open-any(stack0, rest)
 
   fun close-cell(st0: dstate) : <div,exn> dstate
-    if has-open(st0.stack, "td") then
-      st(pop-to(st0.stack, "td"), st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors)
-    elif has-open(st0.stack, "th") then
-      st(pop-to(st0.stack, "th"), st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors)
+    if has-open-html(st0.stack, "td") then
+      st(pop-to-html(st0.stack, "td"), st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors)
+    elif has-open-html(st0.stack, "th") then
+      st(pop-to-html(st0.stack, "th"), st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors)
     else
       st0
 
   fun close-row(st0: dstate) : <div,exn> dstate
-    if has-open(st0.stack, "tr") then
-      st(pop-to(st0.stack, "tr"), st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors)
+    if has-open-html(st0.stack, "tr") then
+      st(pop-to-html(st0.stack, "tr"), st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors)
     else
       st0
 
   fun ensure-tbody(st0: dstate) : <div,exn> dstate
-    if has-open-any(st0.stack, Cons("tbody", Cons("thead", Cons("tfoot", Nil)))) then
+    if has-open-html(st0.stack, "tbody") || has-open-html(st0.stack, "thead") || has-open-html(st0.stack, "tfoot") then
       st0
     else
       push-el(st0, "tbody", Html, Nil)
 
   fun ensure-tr(st0: dstate) : <div,exn> dstate
-    if has-open(st0.stack, "tr") then st0 else push-el(st0, "tr", Html, Nil)
+    if has-open-html(st0.stack, "tr") then st0 else push-el(st0, "tr", Html, Nil)
 
   fun foster-stack(stack0: list<frame>, child: tnode) : <div,exn> maybe<list<frame>>
     match stack0
@@ -2842,7 +2890,11 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
             if is-ws(s) || in-template-content(st0.stack) || !foster-needed(st0.stack) then
               (append(st0, TText(s)), False)
             else
-              (foster-append(st0, TText(s)), False)
+              {
+                // html5lib counts foster-parenting character errors (legacy+modern buckets).
+                val st1 = add-errors(st0, 3)
+                (foster-append(st1, TText(s)), False)
+              }
           TokComment(data) -> (append(st0, TComment(data)), False)
           TokDoctype(_,_,_,_) -> (add-error(st0), False)
           TokEOF -> (add-eof-error(st0), False)
@@ -2957,7 +3009,11 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
             if is-ws(s) || in-template-content(st0.stack) || !foster-needed(st0.stack) then
               (append(st0, TText(s)), False)
             else
-              (foster-append(st0, TText(s)), False)
+              {
+                // html5lib counts foster-parenting character errors (legacy+modern buckets).
+                val st1 = add-errors(st0, 3)
+                (foster-append(st1, TText(s)), False)
+              }
           TokComment(data) -> (append(st0, TComment(data)), False)
           TokDoctype(_,_,_,_) -> (add-error(st0), False)
           TokEOF -> (add-eof-error(st0), False)
@@ -2972,8 +3028,17 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
             elif name == "html" || name == "body" then
               (add-error(st0), False)
             elif is-table-cell(name) then
-              if has-open(st0.stack, name) then
-                { val st1 = end-tag(st0, name); (st(st1.stack, InRow, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False) }
+              if has-open-html(st0.stack, name) then
+                {
+                  // Close the cell. Count a parse error if the current node isn't a cell element.
+                  // In namespace-sensitive cases (foreign `<td>` inside `<svg>`), html5lib counts an unexpected-end-tag
+                  // error even though we still close the HTML cell.
+                  val stx = if has-open-foreign-name(st0.stack, name) then add-error(st0) else st0
+
+                  val stack1 = pop-to-html(stx.stack, name)
+                  val st1 = st(stack1, stx.imode, stx.html-inserted, stx.head-inserted, stx.body-inserted, stx.errors)
+                  (st(st1.stack, InRow, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False)
+                }
               else
                 (add-error(st0), False)
             elif name == "table" then
