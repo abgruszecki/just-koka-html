@@ -334,7 +334,11 @@ fun element-ns(stack0: list<frame>, name0: string) : <div,exn> namespace
       elif is-integration-point(Svg, parentName, parentAttrs) then Html else Svg
     Math ->
       if name == "svg" then Svg
-      elif is-integration-point(Math, parentName, parentAttrs) then Html else Math
+      elif is-integration-point(Math, parentName, parentAttrs) then
+        // MathML text integration points generally switch back to HTML parsing, but `mglyph` and
+        // `malignmark` remain MathML children (html5lib foreign fragment fixtures depend on this).
+        if name == "mglyph" || name == "malignmark" then Math else Html
+      else Math
 
 fun adjust-tag-name(ns: namespace, name: string) : string
   match ns
@@ -1043,15 +1047,30 @@ fun run-treebuilder(tokens: list<tokenizer/tokenloc>, st0: dstate, scriptingEnab
       val rawLower = lower-ascii-string(rawName)
       val (curName, curNs, _curAttrs) = current-element(st0.stack)
 
+      fun has-attr-local(attrs0: list<attr>, local0: string) : <div,exn> bool
+        match attrs0
+          Nil -> False
+          Cons(Attr(an, _v), rest) ->
+            match an
+              Attrname(None, local) ->
+                if lower-ascii-string(local) == local0 then True else has-attr-local(rest, local0)
+              _ -> has-attr-local(rest, local0)
+
       fun is-integration-point(ns: namespace, name: string) : bool
         match ns
           Svg -> is-svg-html-integration-point(name)
           Math -> is-math-text-integration-point(name)
           _ -> False
 
+      fun should-foreign-breakout(tag: string, attrs0: list<attr>) : <div,exn> bool
+        if tag == "font" then
+          has-attr-local(attrs0, "color") || has-attr-local(attrs0, "face") || has-attr-local(attrs0, "size")
+        else
+          is-foreign-breakout-element(tag)
+
       // Foreign-content "breakout" tags (like <nobr>) should break out and be inserted in HTML namespace.
       val stx =
-        if !is-html-ns(curNs) && !is-integration-point(curNs, curName) && is-foreign-breakout-element(rawLower) then
+        if !is-html-ns(curNs) && !is-integration-point(curNs, curName) && should-foreign-breakout(rawLower, attrs) then
           {
             val st1 = add-error(st0)
             val stack1 = pop-foreign-elements(st1.stack)
@@ -1063,12 +1082,17 @@ fun run-treebuilder(tokens: list<tokenizer/tokenloc>, st0: dstate, scriptingEnab
       val ns = ns0
       val name = adjust-tag-name(ns, rawLower)
       val attrs1 = adjust-attrs(ns, attrs)
-      if in-template-content(stx.stack) && is-html-ns(ns) && (name == "frame" || name == "frameset") then
+      // html5lib: treat `/>` on non-void HTML elements as a parse error; ignore the slash.
+      // (html5lib counts this in both the legacy and new error buckets.)
+      val stSc = if selfClosing && is-html-ns(ns) && !is-void-element(name) then add-errors(stx, 2) else stx
+      val selfClosing1 = if selfClosing && is-html-ns(ns) && !is-void-element(name) then False else selfClosing
+
+      if in-template-content(stSc.stack) && is-html-ns(ns) && (name == "frame" || name == "frameset") then
         // html5lib `template.dat`: these tokens are parse errors and are ignored inside template content.
-        add-error(stx)
-      elif (is-html-ns(ns) && name == "template" && !selfClosing) then
+        add-error(stSc)
+      elif (is-html-ns(ns) && name == "template" && !selfClosing1) then
         {
-          val st1 = push-el(stx, "template", Html, attrs1)
+          val st1 = push-el(stSc, "template", Html, attrs1)
           st(
             Cons(Frame(FTemplateContent(InTemplate), Nil), st1.stack),
             InTemplate,
@@ -1081,10 +1105,10 @@ fun run-treebuilder(tokens: list<tokenizer/tokenloc>, st0: dstate, scriptingEnab
             st1.tok-col
           )
         }
-      elif selfClosing || (is-html-ns(ns) && is-void-element(name)) then
-        insert-void(stx, name, ns, attrs1)
+      elif selfClosing1 || (is-html-ns(ns) && is-void-element(name)) then
+        insert-void(stSc, name, ns, attrs1)
       else
-        push-el(stx, name, ns, attrs1)
+        push-el(stSc, name, ns, attrs1)
     }
 
   fun end-tag(st0: dstate, name: string) : <div,exn> dstate
@@ -2133,25 +2157,31 @@ fun run-treebuilder(tokens: list<tokenizer/tokenloc>, st0: dstate, scriptingEnab
         Math -> is-math-text-integration-point(lower-ascii-string(name0))
         _ -> False
 
-    fun is-table-mode(m: mode) : bool
-      match m
-        InTable -> True
-        InTableBody -> True
-        InColumnGroup -> True
-        InRow -> True
-        InCell -> True
-        _ -> False
-
     val useForeign0 = (!is-html-ns(curNs) && !is-integration-point(curNs, curName0))
-    val useForeign = (useForeign0 && is-table-mode(st0.imode))
+    val useForeign = useForeign0
     if useForeign then
       match t00
         TokStartTag(name0, attrs, selfClosing) ->
           {
             val name = lower-ascii-string(name0)
+            fun has-attr-local(attrs0: list<attr>, local0: string) : <div,exn> bool
+              match attrs0
+                Nil -> False
+                Cons(Attr(an, _v), rest) ->
+                  match an
+                    Attrname(None, local) ->
+                      if lower-ascii-string(local) == local0 then True else has-attr-local(rest, local0)
+                    _ -> has-attr-local(rest, local0)
+
+            fun should-foreign-breakout(tag: string, attrs0: list<attr>) : <div,exn> bool
+              if tag == "font" then
+                has-attr-local(attrs0, "color") || has-attr-local(attrs0, "face") || has-attr-local(attrs0, "size")
+              else
+                is-foreign-breakout-element(tag)
+
             // In foreign content, certain HTML elements (like <p>, <br>, <nobr>, etc.) must
             // "break out" and be processed using the current insertion mode rules.
-            if is-foreign-breakout-element(name) then
+            if should-foreign-breakout(name, attrs) then
               {
                 val st1 = add-error(st00)
                 val stack1 = pop-foreign-elements(st1.stack)
@@ -2161,14 +2191,47 @@ fun run-treebuilder(tokens: list<tokenizer/tokenloc>, st0: dstate, scriptingEnab
             else
               (start-tag(st00, name, attrs, selfClosing), False)
           }
-        TokEndTag(name) ->
+        TokEndTag(name0) ->
           {
-            val endName = lower-ascii-string(name)
-            val stx =
-              if has-open(st00.stack, name) && curName != endName then add-error(st00) else st00
-            val st1 =
-              if has-open(stx.stack, name) then end-tag(stx, name) else add-error(stx)
-            (st1, False)
+            val endName = lower-ascii-string(name0)
+            // In foreign content, mismatched end tags are parse errors and are ignored (do not pop to a deeper match).
+            // For fragment parsing, ignore end tags that try to close the fragment's context element.
+            if is-foreign-breakout-element(endName) then
+              {
+                // Break out of foreign content and reprocess using the current insertion mode (html5lib foreign fragments).
+                val st1 = add-error(st00)
+                val stack1 = pop-foreign-elements(st1.stack)
+                (st(stack1, st1.imode, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col), True)
+              }
+            else
+              {
+                fun frag-ctx(stack0: list<frame>) : <div,exn> maybe<(string, namespace)>
+                  match stack0
+                    Nil -> Nothing
+                    Cons(fr, rest) ->
+                      match fr.kind
+                        FFrag(Just(Fragmentcontext(tag0, ns0))) -> Just((lower-ascii-string(tag0.trim), ns0))
+                        _ -> frag-ctx(rest)
+
+                val isCtx =
+                  match frag-ctx(st00.stack)
+                    Just((ctxTag, ctxNs)) ->
+                      {
+                        fun same-ns(ns1: namespace, ns2: namespace) : bool
+                          match (ns1, ns2)
+                            (Html, Html) -> True
+                            (Svg, Svg) -> True
+                            (Math, Math) -> True
+                            _ -> False
+                        same-ns(ctxNs, curNs) && curName == ctxTag
+                      }
+                    _ -> False
+
+                if endName == curName && !isCtx then
+                  (end-tag(st00, name0), False)
+                else
+                  (add-error(st00), False)
+              }
           }
         TokCharacter(s) ->
           if s == "" then (st00, False) else (append(st00, TText(s)), False)
@@ -2739,6 +2802,18 @@ fun run-treebuilder(tokens: list<tokenizer/tokenloc>, st0: dstate, scriptingEnab
                       (st0x, False)
                   elif name == "br" then
                     (start-tag(add-error(st0x), "br", Nil, True), False)
+                  elif name == "p" then
+                    if has-open(st0x.stack, "p") then
+                      // Close an open <p> in scope.
+                      (st(pop-to(st0x.stack, "p"), st0x.imode, st0x.html-inserted, st0x.head-inserted, st0x.body-inserted, st0x.errors, st0x.errlist, st0x.tok-line, st0x.tok-col), False)
+                    else
+                      {
+                        // Spec/html5lib: a stray </p> implies a <p> element.
+                        val st1 = add-error(st0x)
+                        val st2 = start-tag(st1, "p", Nil, False)
+                        val st3 = end-tag(st2, "p")
+                        (st3, False)
+                      }
                   elif name == "template" && in-template-content(st0x.stack) then
                     // html5lib's template fixture counts a mismatch error when </template> appears while there are still
                     // unclosed elements in the template content.
