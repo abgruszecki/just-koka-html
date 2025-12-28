@@ -446,24 +446,42 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
     else
       if is-svg-integration-point(tagName) || is-math-text-integration-point(tagName) then True else False
 
-  // Stack of open elements, storing (lowercase tag name, autoswitch-ok-for-children).
-  var ctx-stack : list<(string, bool)> := Cons(("#document", True), Nil)
+  // Stack of open elements for tokenizer-driven approximations:
+  // - lowercase tag name (used for pop matching)
+  // - "namespace mode" for tokenization (Html vs foreign)
+  // - autoswitch-ok-for-children (integration point heuristic)
+  var ctx-stack : list<(string, namespace, bool)> := Cons(("#document", Html, True), Nil)
 
   fun cur-autoswitch-ok()
     match ctx-stack
-      Cons((_, ok), _) -> ok
+      Cons((_, _, ok), _) -> ok
       _ -> True
+
+  fun cur-namespace()
+    match ctx-stack
+      Cons((_, ns, _), _) -> ns
+      _ -> Html
 
   fun push-ctx(tagName0: string)
     val ok = child-autoswitch(cur-autoswitch-ok(), tagName0)
-    ctx-stack := Cons((lower-ascii-string(tagName0), ok), ctx-stack)
+    val tagName = lower-ascii-string(tagName0)
+    val ns =
+      if ok then Html else
+        match tagName
+          "svg" -> Svg
+          "math" -> Math
+          _ ->
+            match cur-namespace()
+              Html -> Html
+              other -> other
+    ctx-stack := Cons((tagName, ns, ok), ctx-stack)
 
   fun pop-ctx(tagName0: string)
     val want = lower-ascii-string(tagName0)
-    fun go(xs: list<(string, bool)>) : list<(string, bool)>
+    fun go(xs: list<(string, namespace, bool)>) : list<(string, namespace, bool)>
       match xs
         Nil -> xs
-        Cons((nm, _ok), rest) ->
+        Cons((nm, _ns, _ok), rest) ->
           if nm == "#document" then xs
           elif nm == want then rest
           else go(rest)
@@ -896,7 +914,11 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
           text-acc := Cons('<', text-acc)
           reconsume(SData)
       SMarkupDeclOpen ->
-        if (c == '-' && i + 1 < cs.length && cs[i + 1] == '-' ) then
+        // CDATA sections are recognized only in foreign content (e.g. inside <svg>),
+        // and should produce character tokens rather than bogus comments.
+        if ((match cur-namespace() { Html -> False; _ -> True }) && !cur-autoswitch-ok() && c == '[' && starts-with-ci(cs, i, "[CDATA[")) then
+          { state := SCDataSection; i := i + 6 }
+        elif (c == '-' && i + 1 < cs.length && cs[i + 1] == '-' ) then
           // Consume "<!--"
           comment-acc := Nil
           state := SCommentStart
@@ -1391,6 +1413,7 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
   match state
     STagOpen -> text-acc := Cons('<', text-acc)
     SMarkupDeclOpen -> emit-token(TokComment(""))
+    SCDataSection -> { add-err("eof-in-cdata", eof-at); add-err("eof-in-cdata", eof-at) }
     SRCDATALessThanSign -> text-acc := Cons('<', text-acc)
     SRAWTEXTLessThanSign -> text-acc := Cons('<', text-acc)
     SScriptDataLessThanSign -> text-acc := Cons('<', text-acc)

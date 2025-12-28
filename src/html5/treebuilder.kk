@@ -2306,7 +2306,10 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
                         (end-tag(st0x, name), False)
                     else
                       // Treat stray end tags as parse errors (html5lib tree tests count these).
-                      (st(st0x.stack, st0x.imode, st0x.html-inserted, st0x.head-inserted, st0x.body-inserted, st0x.errors + 1), False)
+                      {
+                        val n = if is-html-ns(curNs) then 1 else 2
+                        (st(st0x.stack, st0x.imode, st0x.html-inserted, st0x.head-inserted, st0x.body-inserted, st0x.errors + n), False)
+                      }
                 }
             }
           TokCharacter(s) ->
