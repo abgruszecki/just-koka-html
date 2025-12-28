@@ -16,8 +16,10 @@ This repo already includes:
 As of the current `master`:
 - Koka runner CLI exists (`src/cli.kk`) and is driven by Python harnesses (`tools/run_html5lib_tests.py`, `tools/run_encoding_tests.py`).
 - Tokenizer tests: passing with `data/html5lib_allowlists.json` enabling 100% of tokenizer fixtures.
-- Tree construction tests: passing for the currently enabled allowlisted subsets; coverage is still partial and is expected to grow over time.
+- Tree construction tests: expected to pass for the currently enabled allowlisted subsets; coverage is still partial and is expected to grow over time.
 - Encoding sniffing: passing the encoding fixture set used by `tools/run_encoding_tests.py`.
+
+**Note:** the working baseline is intended to be “allowlist-green”; if `tools/run_tests.py` reports failures, treat that as a regression to fix before changing allowlists.
 
 ## User-facing API (Koka)
 
