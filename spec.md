@@ -11,6 +11,14 @@ This repo already includes:
 
 ---
 
+## Status (this repo)
+
+As of the current `master`:
+- Koka runner CLI exists (`src/cli.kk`) and is driven by Python harnesses (`tools/run_html5lib_tests.py`, `tools/run_encoding_tests.py`).
+- Tokenizer tests: passing with `data/html5lib_allowlists.json` enabling 100% of tokenizer fixtures.
+- Tree construction tests: passing for the currently enabled allowlisted subsets; coverage is still partial and is expected to grow over time.
+- Encoding sniffing: passing the encoding fixture set used by `tools/run_encoding_tests.py`.
+
 ## User-facing API (Koka)
 
 ### Design goals
@@ -229,15 +237,21 @@ Deliverables:
 Exit criteria:
 - `parse(example).dom |> to-test-format` matches expected exactly.
 
+Status: ✅ Done (runner smoke test exists and passes via `tools/run_tests.py`).
+
 ## Milestone 1 (tokenizer correctness slice)
 - Implement HTML5 tokenizer states needed for a small allowlisted subset.
 - Add CLI mode to run tokenizer tests and emit comparable output.
 - Start enabling a handful of tokenizer cases in `html5lib_allowlists.json`.
 
+Status: ✅ Done (tokenizer harness passes with allowlists enabling all tokenizer fixtures).
+
 ## Milestone 2 (treebuilder core)
 - Implement insertion modes and implied elements for common cases.
 - Add support for `#document-fragment` and fragment contexts.
 - Enable a small set of tree-construction doc + fragment cases.
+
+Status: 🚧 In progress (treebuilder passes enabled allowlists; remaining work is expanding coverage toward 100%).
 
 ## Milestone 3 (foreign content + templates)
 - SVG/Math integration points, adjusted tag/attribute names, template handling.
