@@ -2128,6 +2128,23 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
                       stx
                   (start-tag(st1, name, attrs, selfClosing), False)
                 }
+              elif is-heading-element(name) then
+                {
+                  // Heading start tags (h1..h6) implicitly close an open heading element.
+                  // This fixes cases like `<h1>..<h2>..` where `<h2>` must not be nested under `<h1>`.
+                  val stp = close-p-if-needed(stx, name)
+                  val (curName0, curNs0, _curAttrs0) = current-element(stp.stack)
+                  val curLow = lower-ascii-string(curName0)
+                  val st1 =
+                    if is-html-ns(curNs0) && is-heading-element(curLow) then
+                      {
+                        val ste = add-error(stp)
+                        st(pop-to(ste.stack, curLow), ste.imode, ste.html-inserted, ste.head-inserted, ste.body-inserted, ste.errors)
+                      }
+                    else
+                      stp
+                  (start-tag(st1, name, attrs, selfClosing), False)
+                }
               else
                 {
                   val ns = element-ns(stx.stack, name)
