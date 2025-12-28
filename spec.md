@@ -260,6 +260,7 @@ Status: 🚧 In progress (treebuilder passes enabled allowlists; remaining work 
 ## Milestone 4 (errors + locations)
 - Accurate parse error codes and 1-based locations (tokenizer + treebuilder).
 - Ensure tree-construction tests’ error counts match.
+ - **Implementation note (Koka)**: avoid relying on nested helper functions that capture locally-mutable state for error sinks/positions; prefer threading error state explicitly (e.g. as part of the treebuilder state) so the compiler doesn’t need to generalize heap-parameterized `local` effects.
 
 ## Milestone 5 (encoding + byte input)
 - Encoding sniffing + overrides, pass `html5lib-tests/encoding` (if included in our runner).
@@ -343,4 +344,5 @@ Guiding principles:
 - Tree-doc allowlist is now `1078/1590` (`doctype01.dat` is `30/37`, `ruby.dat` is `17/21`, `tests19.dat` is `77/103`, `tests2.dat` is `41/63`, `tests7.dat` is `22/33`, `tests10.dat` is `32/54`, `tests12.dat` is `2/2`, `tests18.dat` is `23/36`, `tests20.dat` is `52/64`, `tests9.dat` is `19/27`, `tests21.dat` is `23/23`, `namespace-sensitivity.dat` is `1/1`, `domjs-unsafe.dat` is `29/49`, `webkit01.dat` is `39/54`, `webkit02.dat` is `25/45`, `template.dat` is `63/111`, and `plain-text-unsafe.dat` is `9/33`) driven by continued incremental fixes + auto-allowlisting.
 - Tree-frag allowlist is now `101/192` (notably `foreign-fragment.dat` `49/66`, `math.dat` `8/8`, `svg.dat` `8/8`, `tests4.dat` `8/9`, `tests6.dat` `5/13`, `tests_innerHTML_1.dat` `20/81`, and `template.dat` `1/1`).
 - Not implemented yet (high-level): full HTML5 treebuilder insertion modes + table modes + adoption agency edge cases (especially involving table foster parenting), foreign content/templates beyond the current slice, and treebuilder error locations/codes.
+ - Not implemented yet (Milestone 4 specifics): treebuilder parse error *codes* and 1-based *locations* (today the harness only validates counts, and the user-facing `ParseError` values for treebuilder are still placeholders).
 - CI: runs smoke + html5lib allowlisted tests, and blocks allowlist regressions via `diff-prev --fail-on-decrease`.
