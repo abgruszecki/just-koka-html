@@ -2711,6 +2711,12 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
                 val st1 = st(stack1, InTable, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors)
                 (st1, True)
               }
+            elif has-open(st0.stack, "caption") && (name == "tr" || is-table-section(name) || is-table-cell(name)) then
+              {
+                // If a <caption> element is open, close it before handling table-structure tokens.
+                val st1 = end-tag(st0, "caption")
+                (st(st1.stack, InTable, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True)
+              }
             elif name == "table" then
               {
                 // Fragment parsing in a <table> context: ignore a leading nested <table> start tag.
