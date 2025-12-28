@@ -31,6 +31,7 @@ def main() -> int:
     raw = fx_path.read_text(encoding="utf-8", errors="replace")
     blocks = _split_tree_construction_blocks(raw)
 
+    show_idx = int(args.show) if args.show is not None else None
     cases: list[dict[str, Any]] = []
     expect: list[tuple[int, str, int]] = []
 
@@ -40,6 +41,9 @@ def main() -> int:
         parsed = parse_tree_block(block)
         is_frag = parsed["fragment_context"] is not None
         if args.kind == "frag" and is_frag:
+            if show_idx is not None and frag_i != show_idx:
+                frag_i += 1
+                continue
             cases.append(
                 {
                     "kind": "frag",
@@ -51,6 +55,9 @@ def main() -> int:
             expect.append((frag_i, parsed["expected"], int(parsed["error_count"])))
             frag_i += 1
         elif args.kind == "doc" and not is_frag:
+            if show_idx is not None and doc_i != show_idx:
+                doc_i += 1
+                continue
             cases.append(
                 {
                     "kind": "doc",
@@ -70,8 +77,6 @@ def main() -> int:
     got_batch = run_tree_cases_batch(exe, cases)
     mismatches: list[str] = []
 
-    show_idx = int(args.show) if args.show is not None else None
-
     for (orig_idx, exp_tree, exp_errs), out in zip(expect, got_batch, strict=True):
         if not (isinstance(out, list) and len(out) == 2):
             mismatches.append(f"{args.fixture} {args.kind} #{orig_idx}: invalid runner output shape")
@@ -82,7 +87,7 @@ def main() -> int:
             print(f"kind: {args.kind}")
             print(f"index: {orig_idx}")
             print("\ninput:")
-            print(cases[expect.index((orig_idx, exp_tree, exp_errs))]["input"])
+            print(cases[0]["input"])
             print("\nexpected tree:")
             print(exp_tree)
             print("\ngot tree:")
@@ -103,4 +108,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

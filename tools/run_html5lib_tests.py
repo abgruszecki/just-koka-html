@@ -20,6 +20,18 @@ RUNNER_TIMEOUT_S = float(os.environ.get("HTML5LIB_RUNNER_TIMEOUT_S", "30"))
 
 def build_runner(exe: Path) -> None:
     exe.parent.mkdir(parents=True, exist_ok=True)
+
+    # Avoid rebuilding the runner when nothing changed; koka -O2 can be slow.
+    try:
+        if exe.exists():
+            exe_mtime = exe.stat().st_mtime
+            latest_src_mtime = max(p.stat().st_mtime for p in (ROOT / "src").rglob("*.kk"))
+            if exe_mtime >= latest_src_mtime:
+                return
+    except OSError:
+        # Fall back to always rebuilding if we can't stat files.
+        pass
+
     subprocess.run(
         ["koka", "--include=src", "-O2", "-o", str(exe), "src/cli.kk"],
         cwd=str(ROOT),
