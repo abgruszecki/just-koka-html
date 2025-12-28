@@ -253,9 +253,21 @@ Status: ✅ Done (tokenizer harness passes with allowlists enabling all tokenize
 
 Status: 🚧 In progress (treebuilder passes enabled allowlists; remaining work is expanding coverage toward 100%).
 
+### Remaining work to mark M2 “done”
+The remaining failures are dominated by **misnested formatting** + **exact error-counting** in edge insertion modes.
+Concrete work items (each intended to be its own vertical-slice commit: fix → enable cases → `diff-prev`):
+1. **Adoption agency algorithm (full loop)** for formatting end tags (esp. `a`, `b`, `i`, `nobr`, etc.), including interactions with foster parenting (targets: `adoption01.dat`, `adoption02.dat`, plus many `tests1.dat` cases).
+2. **Exact parse-error counting** for ignored/unmatched end tags across modes (targets: `plain-text-unsafe.dat`, `tests_innerHTML_1.dat` fragments, and many `tests*.dat` structural cases).
+3. **Select/table mode edges** (insertion mode transitions and “clear stack back to … context”), which currently gate many `tests1.dat` / `tests16.dat` cases.
+4. **Frameset/body mode edges** (when `<frameset>` replaces `<body>`; error counts + insertion targets).
+
 ## Milestone 3 (foreign content + templates)
 - SVG/Math integration points, adjusted tag/attribute names, template handling.
 - Expand allowlists in foreign + template fixtures.
+
+### Remaining work to mark M3 “done”
+1. **Template insertion modes stack** and “in template” processing (many remaining `template.dat` doc mismatches are missing/incorrect template-mode dispatch and/or incorrect ignoring of tokens that should be parse errors inside templates).
+2. **Foreign content polish** beyond the current slice: ensure correct break-out/integration-point behavior and attribute adjustments in the remaining `foreign-*` cases.
 
 ## Milestone 4 (errors + locations)
 - Accurate parse error codes and 1-based locations (tokenizer + treebuilder).
@@ -346,5 +358,6 @@ Guiding principles:
 - Treebuilder error counting: treat “non-HTML5” doctypes (non-`<!doctype html>` / with public+system ids / `forceQuirks`) as parse errors to better match html5lib’s `unknown-doctype` bucket.
 - Tree-doc allowlist is now `1091/1590` (`doctype01.dat` is `30/37`, `ruby.dat` is `17/21`, `tests15.dat` is `6/14`, `tests17.dat` is `13/13`, `tests19.dat` is `77/103`, `tests2.dat` is `41/63`, `tests7.dat` is `23/33`, `tests10.dat` is `32/54`, `tests12.dat` is `2/2`, `tests18.dat` is `23/36`, `tests20.dat` is `52/64`, `tests9.dat` is `19/27`, `tests21.dat` is `23/23`, `namespace-sensitivity.dat` is `1/1`, `domjs-unsafe.dat` is `29/49`, `webkit01.dat` is `39/54`, `webkit02.dat` is `25/45`, `template.dat` is `63/111`, and `plain-text-unsafe.dat` is `9/33`) driven by continued incremental fixes + auto-allowlisting.
 - Tree-frag allowlist is now `122/192` (notably `foreign-fragment.dat` `49/66`, `math.dat` `8/8`, `svg.dat` `8/8`, `tests4.dat` `8/9`, `tests6.dat` `6/13`, `tests_innerHTML_1.dat` `40/81`, and `template.dat` `1/1`).
+- Auto-allowlisting currently shows **Δ0** (no additional passing cases) without further treebuilder work; increasing coverage requires implementing the remaining items under Milestones 2–3.
 - Not implemented yet (high-level): full HTML5 treebuilder insertion modes + table modes + adoption agency edge cases (especially involving table foster parenting), foreign content/templates beyond the current slice, and full canonicalization of treebuilder parse error *codes*.
 - CI: runs smoke + html5lib allowlisted tests, and blocks allowlist regressions via `diff-prev --fail-on-decrease`.
