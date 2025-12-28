@@ -1203,6 +1203,24 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
     // `i` is the first non-ws index (or length).
     (slice-string(cs, 0, i), slice-string(cs, i, cs.length))
 
+  fun strip-nulls(s: string) : <div,exn> (clean: string, removed: int)
+    // Tree-construction: treat U+0000 as a parse error and drop it.
+    // (Tokenizer preserves U+0000 for fixture expectations; the treebuilder is where
+    // we match html5lib's tree dumps + error *counts*.)
+    val cs = string/vector(s)
+    var acc : list<char> := Nil
+    var removed := 0
+    var i := 0
+    while(fn(){ i < cs.length }, fn(){
+      val c = cs[i]
+      if c == '\u0000' then
+        removed := removed + 1
+      else
+        acc := Cons(c, acc)
+      i := i + 1
+    })
+    (string/listchar/string(acc.reverse), removed)
+
   fun add-error(st0: dstate) : dstate
     st(st0.stack, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors + 1)
 
@@ -1661,6 +1679,24 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
     with-mode(st0, mode-from-stack(st0.stack))
 
   fun process-one(t: token, st0: dstate) : <div,exn> (next: dstate, reprocess: bool)
+    fun sanitize-char-token(t0: token, stx: dstate) : <div,exn> (st: dstate, tok: token)
+      match t0
+        TokCharacter(s0) ->
+          {
+            val (s1, nulCount) = strip-nulls(s0)
+            // html5lib tree fixtures typically count two tree-construction errors per U+0000
+            // character token ("invalid-codepoint" + "invalid-codepoint-in-body"), in addition
+            // to the tokenizer-level "unexpected-null-character" error.
+            val st1 = add-errors(stx, nulCount * 2)
+            (st1, TokCharacter(s1))
+          }
+        _ -> (stx, t0)
+
+    val (st00, t00) = sanitize-char-token(t, st0)
+    // From here on, use the sanitized token/state so U+0000 handling consistently affects
+    // insertion-mode logic and parse error counts.
+    val st0 = st00
+    val t = t00
     fun process-inbody(t2: token, stx: dstate) : <div,exn> (next: dstate, reprocess: bool)
       {
         val (st1, rep) = process-one(t2, with-mode(stx, InBody))
@@ -1690,7 +1726,7 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
     val useForeign0 = (!is-html-ns(curNs) && !is-integration-point(curNs, curName0))
     val useForeign = (useForeign0 && is-table-mode(st0.imode))
     if useForeign then
-      match t
+      match t00
         TokStartTag(name0, attrs, selfClosing) ->
           {
             val name = lower-ascii-string(name0)
@@ -1698,66 +1734,67 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
             // "break out" and be processed using the current insertion mode rules.
             if is-foreign-breakout-element(name) then
               {
-                val st1 = add-error(st0)
+                val st1 = add-error(st00)
                 val stack1 = pop-foreign-elements(st1.stack)
                 // Reprocess the token in the current insertion mode (now in HTML namespace).
                 (st(stack1, st1.imode, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True)
               }
             else
-              (start-tag(st0, name, attrs, selfClosing), False)
+              (start-tag(st00, name, attrs, selfClosing), False)
           }
         TokEndTag(name) ->
           {
             val endName = lower-ascii-string(name)
             val stx =
-              if has-open(st0.stack, name) && curName != endName then add-error(st0) else st0
+              if has-open(st00.stack, name) && curName != endName then add-error(st00) else st00
             val st1 =
               if has-open(stx.stack, name) then end-tag(stx, name) else add-error(stx)
             (st1, False)
           }
         TokCharacter(s) ->
-          if s == "" then (st0, False) else (append(st0, TText(s)), False)
-        TokComment(data) -> (append(st0, TComment(data)), False)
-        TokDoctype(_,_,_,_) -> (add-error(st0), False)
-        TokEOF -> (add-eof-error(st0), False)
-    else match st0.imode
+          if s == "" then (st00, False) else (append(st00, TText(s)), False)
+        TokComment(data) -> (append(st00, TComment(data)), False)
+        TokDoctype(_,_,_,_) -> (add-error(st00), False)
+        TokEOF -> (add-eof-error(st00), False)
+    else match st00.imode
       Initial ->
-        match t
+        match t00
           TokDoctype(name, publicId, systemId, forceQuirks) ->
             {
               // Treat "non-HTML5" doctypes as parse errors (covers html5lib's `unknown-doctype` bucket).
               val isHtml5 = (!forceQuirks && lower-ascii-string(name) == "html" && publicId == Nothing && systemId == Nothing)
-              val st1 = if isHtml5 then st0 else add-error(st0)
+              val st1 = if isHtml5 then st00 else add-error(st00)
               (append(st(st1.stack, BeforeHtml, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors),
                       TDoctype(Doctype(name, publicId, systemId, forceQuirks))), False)
             }
-          TokComment(data) -> (append(st0, TComment(data)), False)
+          TokComment(data) -> (append(st00, TComment(data)), False)
           TokCharacter(s) ->
-            if is-ws(s) then (st0, False) else (st(st0.stack, BeforeHtml, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors), True)
+            if is-ws(s) then (st00, False)
+            else (st(st00.stack, BeforeHtml, st00.html-inserted, st00.head-inserted, st00.body-inserted, st00.errors), True)
           TokEOF ->
-            (st(st0.stack, BeforeHtml, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors), False)
+            (st(st00.stack, BeforeHtml, st00.html-inserted, st00.head-inserted, st00.body-inserted, st00.errors), False)
           _ ->
-            (st(st0.stack, BeforeHtml, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors), True)
+            (st(st00.stack, BeforeHtml, st00.html-inserted, st00.head-inserted, st00.body-inserted, st00.errors), True)
       BeforeHtml ->
-        match t
-          TokComment(data) -> (append(st0, TComment(data)), False)
+        match t00
+          TokComment(data) -> (append(st00, TComment(data)), False)
           TokCharacter(s) ->
-            if is-ws(s) then (st0, False)
-            else { val st1 = ensure-html(st0, Nil); (st(st1.stack, BeforeHead, True, st1.head-inserted, st1.body-inserted, st1.errors), True) }
+            if is-ws(s) then (st00, False)
+            else { val st1 = ensure-html(st00, Nil); (st(st1.stack, BeforeHead, True, st1.head-inserted, st1.body-inserted, st1.errors), True) }
           TokStartTag(name, attrs, _) ->
             if name == "html" then
-              { val st1 = ensure-html(st0, attrs); (st(st1.stack, BeforeHead, True, st1.head-inserted, st1.body-inserted, st1.errors), False) }
+              { val st1 = ensure-html(st00, attrs); (st(st1.stack, BeforeHead, True, st1.head-inserted, st1.body-inserted, st1.errors), False) }
             else
-              { val st1 = ensure-html(st0, Nil); (st(st1.stack, BeforeHead, True, st1.head-inserted, st1.body-inserted, st1.errors), True) }
+              { val st1 = ensure-html(st00, Nil); (st(st1.stack, BeforeHead, True, st1.head-inserted, st1.body-inserted, st1.errors), True) }
           TokEndTag(_) ->
-            { val st1 = ensure-html(st0, Nil); (st(st1.stack, BeforeHead, True, st1.head-inserted, st1.body-inserted, st1.errors), True) }
+            { val st1 = ensure-html(st00, Nil); (st(st1.stack, BeforeHead, True, st1.head-inserted, st1.body-inserted, st1.errors), True) }
           TokEOF ->
-            { val st1 = ensure-html(st0, Nil); (st(st1.stack, BeforeHead, True, st1.head-inserted, st1.body-inserted, st1.errors), True) }
+            { val st1 = ensure-html(st00, Nil); (st(st1.stack, BeforeHead, True, st1.head-inserted, st1.body-inserted, st1.errors), True) }
           TokDoctype(_,_,_,_) ->
-            (st0, False)
+            (st00, False)
       BeforeHead ->
-        match t
-          TokComment(data) -> (append(st0, TComment(data)), False)
+        match t00
+          TokComment(data) -> (append(st00, TComment(data)), False)
           TokCharacter(s) ->
             if is-ws(s) then (st0, False)
             else
@@ -1951,7 +1988,8 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
             elif name == "frameset" then
               {
                 // Allow a frameset document before inserting a <body>.
-                val st1 = start-tag(st0, name, attrs, False)
+                // html5lib counts this as an "unexpected-start-tag" error, but still inserts the frameset.
+                val st1 = start-tag(add-error(st0), name, attrs, False)
                 (st(st1.stack, InFrameset, st1.html-inserted, st1.head-inserted, True, st1.errors), False)
               }
             elif name == "body" then
