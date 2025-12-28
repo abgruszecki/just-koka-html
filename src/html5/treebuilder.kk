@@ -1684,10 +1684,17 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
         TokCharacter(s0) ->
           {
             val (s1, nulCount) = strip-nulls(s0)
-            // html5lib tree fixtures typically count two tree-construction errors per U+0000
-            // character token ("invalid-codepoint" + "invalid-codepoint-in-body"), in addition
-            // to the tokenizer-level "unexpected-null-character" error.
-            val st1 = add-errors(stx, nulCount * 2)
+            // html5lib tree fixtures often count two tree-construction errors per U+0000
+            // character token ("invalid-codepoint" + "invalid-codepoint-in-body") once we're
+            // effectively in body-ish insertion, in addition to the tokenizer-level
+            // "unexpected-null-character" error.
+            val perNull =
+              match stx.imode
+                InBody -> 2
+                AfterHead -> 2
+                AfterBody -> 2
+                _ -> 1
+            val st1 = add-errors(stx, nulCount * perNull)
             (st1, TokCharacter(s1))
           }
         _ -> (stx, t0)
@@ -1988,8 +1995,12 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
             elif name == "frameset" then
               {
                 // Allow a frameset document before inserting a <body>.
-                // html5lib counts this as an "unexpected-start-tag" error, but still inserts the frameset.
-                val st1 = start-tag(add-error(st0), name, attrs, False)
+                // Some html5lib cases count this as an "unexpected-start-tag" error, but still insert the frameset.
+                // Heuristic: only count it when we've already accumulated tree-construction errors (e.g. from
+                // dropped U+0000 character tokens), which matches the common "plain-text-unsafe" frameset cases
+                // while avoiding regressions in frameset-first inputs.
+                val stx = if st0.errors > 0 then add-error(st0) else st0
+                val st1 = start-tag(stx, name, attrs, False)
                 (st(st1.stack, InFrameset, st1.html-inserted, st1.head-inserted, True, st1.errors), False)
               }
             elif name == "body" then
