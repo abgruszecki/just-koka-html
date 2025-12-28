@@ -2281,6 +2281,22 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
                   val st1 = merge-html-attrs(add-error(stx), attrs)
                   (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False)
                 }
+              elif has-open(stx.stack, "select")
+                   && is-one-of(
+                     name,
+                     Cons(
+                       "table",
+                       Cons(
+                         "tr",
+                         Cons(
+                           "td",
+                           Cons("th", Cons("tbody", Cons("thead", Cons("tfoot", Cons("caption", Cons("col", Cons("colgroup", Nil)))))))
+                         )
+                       )
+                     )
+                   ) then
+                // "In select" mode (approximation): ignore table-structure start tags with a parse error.
+                (add-error(stx), False)
               elif name == "head" then (add-error(stx), False)
               elif name == "body" then
                 {
