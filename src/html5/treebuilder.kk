@@ -4,6 +4,9 @@ import std/core/vector
 import std/core/string
 import html5/dom
 import html5/tokenizer
+import html5/errors
+
+pub alias parseerror = errors/parseerror
 
 type tnode {
   TEl(name: string, ns: namespace, attrs: list<attr>, children: list<tnode>)
@@ -59,7 +62,10 @@ struct dstate(
   head-inserted: bool,
   body-inserted: bool,
   active: list<fmtentry>,
-  errors: int
+  errors: int,
+  errlist: list<parseerror>,
+  tok-line: int,
+  tok-col: int
 )
 
 fun close-frame(fr: frame) : tnode
@@ -542,7 +548,7 @@ fun build-tree(tokens: list<token>, initial: frame) : <div,exn> (children: list<
       _ -> Nil
   (children, errs)
 
-fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, finalizeDoc: bool) : <div,exn> (list<tnode>, int)
+fun run-treebuilder(tokens: list<tokenizer/tokenloc>, st0: dstate, scriptingEnabled: bool, finalizeDoc: bool) : <div,exn> (list<tnode>, list<parseerror>)
   // Token -> treebuilder engine (insertion-mode-ish).
   // `finalizeDoc=true` synthesizes missing <html>/<head>/<body> wrappers and closes <body>.
 
@@ -551,14 +557,56 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
       (TText(new), Cons(TText(prev), rest)) -> Frame(fr.kind, Cons(TText(prev ++ new), rest))
       _ -> Frame(fr.kind, Cons(child, fr.children))
 
-  fun st( stack: list<frame>, imode: mode, html: bool, head: bool, body: bool, errors: int ) : dstate
-    Dstate(stack, imode, html, head, body, Nil, errors)
+  fun st(stack: list<frame>, imode: mode, html: bool, head: bool, body: bool, errors: int, errlist: list<parseerror>, line: int, col: int) : dstate
+    Dstate(stack, imode, html, head, body, Nil, errors, errlist, line, col)
+
+  fun add-error-code(st0: dstate, code: string) : dstate
+    val pe = errors/parseerror-at(code, st0.tok-line, st0.tok-col)
+    st(
+      st0.stack,
+      st0.imode,
+      st0.html-inserted,
+      st0.head-inserted,
+      st0.body-inserted,
+      st0.errors + 1,
+      Cons(pe, st0.errlist),
+      st0.tok-line,
+      st0.tok-col
+    )
+
+  fun add-error(st0: dstate) : dstate
+    add-error-code(st0, "parse-error")
+
+  fun add-errors-code(st0: dstate, n: int, code: string) : <div,exn> dstate
+    if n <= 0 then st0 else
+      {
+        var stx := st0
+        var i := 0
+        while(fn(){ i < n }, fn(){
+          stx := add-error-code(stx, code)
+          i := i + 1
+        })
+        stx
+      }
+
+  fun add-errors(st0: dstate, n: int) : <div,exn> dstate
+    add-errors-code(st0, n, "parse-error")
 
   fun append(st0: dstate, child: tnode) : dstate
     match st0.stack
       Nil -> st0
       Cons(fr, rest) ->
-        st(Cons(add-child(fr, child), rest), st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors)
+        st(
+          Cons(add-child(fr, child), rest),
+          st0.imode,
+          st0.html-inserted,
+          st0.head-inserted,
+          st0.body-inserted,
+          st0.errors,
+          st0.errlist,
+          st0.tok-line,
+          st0.tok-col
+        )
 
   fun append-into-head(st0: dstate, child: tnode) : <div,exn> dstate
     // After the <head> element has been popped, html5lib still expects certain "head" elements
@@ -601,7 +649,8 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
                 Nothing -> Nothing
 
     match go(st0.stack)
-      Just(stack1) -> st(stack1, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors)
+      Just(stack1) ->
+        st(stack1, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors, st0.errlist, st0.tok-line, st0.tok-col)
       Nothing -> append(st0, child)
 
   fun append-into-body(st0: dstate, child: tnode) : <div,exn> dstate
@@ -663,7 +712,8 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
                 Nothing -> Nothing
 
     match go(st0.stack)
-      Just(stack1) -> st(stack1, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors)
+      Just(stack1) ->
+        st(stack1, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors, st0.errlist, st0.tok-line, st0.tok-col)
       Nothing ->
         {
           // If the <html> element has already been closed into the document, update the closed tree.
@@ -689,7 +739,8 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
                       Just(tail) -> Just(Cons(fr, tail))
                       Nothing -> Nothing
           match update-doc(st0.stack)
-            Just(stack2) -> st(stack2, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors)
+            Just(stack2) ->
+              st(stack2, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors, st0.errlist, st0.tok-line, st0.tok-col)
             Nothing -> append(st0, child)
         }
 
@@ -702,10 +753,30 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
       _ -> False
 
   fun push-el(st0: dstate, name: string, ns: namespace, attrs: list<attr>) : dstate
-    st(Cons(Frame(FEl(name, ns, attrs), Nil), st0.stack), st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors)
+    st(
+      Cons(Frame(FEl(name, ns, attrs), Nil), st0.stack),
+      st0.imode,
+      st0.html-inserted,
+      st0.head-inserted,
+      st0.body-inserted,
+      st0.errors,
+      st0.errlist,
+      st0.tok-line,
+      st0.tok-col
+    )
 
   fun push-el-foster(st0: dstate, name: string, ns: namespace, attrs: list<attr>) : dstate
-    st(Cons(Frame(FElFoster(name, ns, attrs), Nil), st0.stack), st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors)
+    st(
+      Cons(Frame(FElFoster(name, ns, attrs), Nil), st0.stack),
+      st0.imode,
+      st0.html-inserted,
+      st0.head-inserted,
+      st0.body-inserted,
+      st0.errors,
+      st0.errlist,
+      st0.tok-line,
+      st0.tok-col
+    )
 
   fun has-open(stack0: list<frame>, name: string) : <div,exn> bool
     match stack0
@@ -878,13 +949,13 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
               }
             _ -> done := True
     })
-    st(stack, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors)
+    st(stack, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors, st0.errlist, st0.tok-line, st0.tok-col)
 
   fun ensure-html(st0: dstate, attrs: list<attr>) : dstate
     if st0.html-inserted then st0 else
       {
         val st1 = push-el(st0, "html", Html, attrs)
-        st(st1.stack, st1.imode, True, st1.head-inserted, st1.body-inserted, st1.errors)
+        st(st1.stack, st1.imode, True, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col)
       }
 
   fun ensure-head(st0: dstate, attrs: list<attr>) : dstate
@@ -892,20 +963,20 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
     if st1.head-inserted then st1 else
       {
         val st2 = push-el(st1, "head", Html, attrs)
-        st(st2.stack, st2.imode, st2.html-inserted, True, st2.body-inserted, st2.errors)
+        st(st2.stack, st2.imode, st2.html-inserted, True, st2.body-inserted, st2.errors, st2.errlist, st2.tok-line, st2.tok-col)
       }
 
   fun ensure-body(st0: dstate, attrs: list<attr>) : <div,exn> dstate
     val st1 = ensure-html(st0, Nil)
     val st2 =
       if has-open(st1.stack, "head") then
-        st(pop-to(st1.stack, "head"), st1.imode, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors)
+        st(pop-to(st1.stack, "head"), st1.imode, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col)
       else
         st1
     if st2.body-inserted then st2 else
       {
         val st3 = push-el(st2, "body", Html, attrs)
-        st(st3.stack, st3.imode, st3.html-inserted, st3.head-inserted, True, st3.errors)
+        st(st3.stack, st3.imode, st3.html-inserted, st3.head-inserted, True, st3.errors, st3.errlist, st3.tok-line, st3.tok-col)
       }
 
   fun insert-void(st0: dstate, name: string, ns: namespace, attrs: list<attr>) : dstate
@@ -961,9 +1032,9 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
       val stx =
         if !is-html-ns(curNs) && !is-integration-point(curNs, curName) && is-foreign-breakout-element(rawLower) then
           {
-            val st1 = st(st0.stack, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors + 1)
+            val st1 = add-error(st0)
             val stack1 = pop-foreign-elements(st1.stack)
-            st(stack1, st1.imode, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors)
+            st(stack1, st1.imode, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col)
           }
         else st0
 
@@ -974,7 +1045,17 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
       if (is-html-ns(ns) && name == "template" && !selfClosing) then
         {
           val st1 = push-el(stx, "template", Html, attrs1)
-          st(Cons(Frame(FTemplateContent, Nil), st1.stack), st1.imode, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors)
+          st(
+            Cons(Frame(FTemplateContent, Nil), st1.stack),
+            st1.imode,
+            st1.html-inserted,
+            st1.head-inserted,
+            st1.body-inserted,
+            st1.errors,
+            st1.errlist,
+            st1.tok-line,
+            st1.tok-col
+          )
         }
       elif selfClosing || (is-html-ns(ns) && is-void-element(name)) then
         insert-void(stx, name, ns, attrs1)
@@ -1011,14 +1092,34 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
       go(stack0, False)
 
     if lower-ascii-string(name) == "template" then
-      st(pop-template-stack(st0.stack), st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors)
+      st(
+        pop-template-stack(st0.stack),
+        st0.imode,
+        st0.html-inserted,
+        st0.head-inserted,
+        st0.body-inserted,
+        st0.errors,
+        st0.errlist,
+        st0.tok-line,
+        st0.tok-col
+      )
     elif has-open(st0.stack, name) then
       {
         val st1 =
           if crosses-template(st0.stack, name) then
-            st(st0.stack, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors + 1)
+            add-error(st0)
           else st0
-        st(pop-to(st1.stack, name), st1.imode, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors)
+        st(
+          pop-to(st1.stack, name),
+          st1.imode,
+          st1.html-inserted,
+          st1.head-inserted,
+          st1.body-inserted,
+          st1.errors,
+          st1.errlist,
+          st1.tok-line,
+          st1.tok-col
+        )
       }
     else st0
 
@@ -1054,7 +1155,19 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
                 if is-implied-end-tag(nm) && lower-ascii-string(nm) != exceptName then
                   {
                     val stack1 = pop-to(stx.stack, nm)
-                    go(st(stack1, stx.imode, stx.html-inserted, stx.head-inserted, stx.body-inserted, stx.errors))
+                    go(
+                      st(
+                        stack1,
+                        stx.imode,
+                        stx.html-inserted,
+                        stx.head-inserted,
+                        stx.body-inserted,
+                        stx.errors,
+                        stx.errlist,
+                        stx.tok-line,
+                        stx.tok-col
+                      )
+                    )
                   }
                 else stx
               _ -> stx
@@ -1198,7 +1311,7 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
       val add2 = if has-doc-root(st0.stack) && has-template-content(st0.stack) then 1 else 0
       val n = add1 + add2
       if n <= 0 then st0
-      else st(st0.stack, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors + n)
+      else add-errors(st0, n)
     }
 
   fun closes-p-on-start(name: string) : bool
@@ -1352,7 +1465,7 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
 
   fun close-p-if-needed(st0: dstate, name: string) : <div,exn> dstate
     if closes-p-on-start(name) && has-in-button-scope(st0.stack, "p") then
-      st(pop-to(st0.stack, "p"), st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors)
+      st(pop-to(st0.stack, "p"), st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors, st0.errlist, st0.tok-line, st0.tok-col)
     else
       st0
 
@@ -1407,12 +1520,6 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
       i := i + 1
     })
     (string/listchar/string(acc.reverse), removed)
-
-  fun add-error(st0: dstate) : dstate
-    st(st0.stack, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors + 1)
-
-  fun add-errors(st0: dstate, n: int) : dstate
-    if n <= 0 then st0 else st(st0.stack, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors + n)
 
   fun is-one-of(name: string, xs: list<string>) : <div,exn> bool
     match xs
@@ -1479,7 +1586,7 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
                 Just(kids2) -> Cons(Frame(FDoc, kids2), rest)
                 Nothing -> Cons(fr, go(rest))
             _ -> Cons(fr, go(rest))
-    st(go(st0.stack), st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors)
+    st(go(st0.stack), st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors, st0.errlist, st0.tok-line, st0.tok-col)
 
   fun merge-body-attrs(st0: dstate, attrs: list<attr>) : <div,exn> dstate
     fun go(stack0: list<frame>) : <div,exn> list<frame>
@@ -1493,7 +1600,7 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
               else
                 Cons(fr, go(rest))
             _ -> Cons(fr, go(rest))
-    st(go(st0.stack), st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors)
+    st(go(st0.stack), st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors, st0.errlist, st0.tok-line, st0.tok-col)
 
   fun append-into-html-node(st0: dstate, child: tnode) : <div,exn> dstate
     // Append a child into the existing <html> element even when it has already been popped into the document.
@@ -1537,7 +1644,8 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
                 Nothing -> Nothing
 
     match go(st0.stack)
-      Just(stack1) -> st(stack1, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors)
+      Just(stack1) ->
+        st(stack1, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors, st0.errlist, st0.tok-line, st0.tok-col)
       Nothing -> st0
 
   fun is-formatting-element(name0: string) : <div,exn> bool
@@ -1746,7 +1854,19 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
                                 // html5lib's adoption fixtures sometimes count multiple "adoption-agency" errors
                                 // for deeply nested special elements; approximate that by charging 1 per special block.
                                 val addErr = if specials <= 0 then 1 else specials
-                                st(stack1, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors + addErr)
+                                val st1 =
+                                  st(
+                                    stack1,
+                                    st0.imode,
+                                    st0.html-inserted,
+                                    st0.head-inserted,
+                                    st0.body-inserted,
+                                    st0.errors,
+                                    st0.errlist,
+                                    st0.tok-line,
+                                    st0.tok-col
+                                  )
+                                add-errors(st1, addErr)
                               }
                             _ -> add-error(st0)
                     }
@@ -1766,15 +1886,15 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
 
   fun close-cell(st0: dstate) : <div,exn> dstate
     if has-open-html(st0.stack, "td") then
-      st(pop-to-html(st0.stack, "td"), st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors)
+      st(pop-to-html(st0.stack, "td"), st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors, st0.errlist, st0.tok-line, st0.tok-col)
     elif has-open-html(st0.stack, "th") then
-      st(pop-to-html(st0.stack, "th"), st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors)
+      st(pop-to-html(st0.stack, "th"), st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors, st0.errlist, st0.tok-line, st0.tok-col)
     else
       st0
 
   fun close-row(st0: dstate) : <div,exn> dstate
     if has-open-html(st0.stack, "tr") then
-      st(pop-to-html(st0.stack, "tr"), st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors)
+      st(pop-to-html(st0.stack, "tr"), st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors, st0.errlist, st0.tok-line, st0.tok-col)
     else
       st0
 
@@ -1806,7 +1926,8 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
 
   fun foster-append(st0: dstate, child: tnode) : <div,exn> dstate
     match foster-stack(st0.stack, child)
-      Just(stack1) -> st(stack1, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors)
+      Just(stack1) ->
+        st(stack1, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors, st0.errlist, st0.tok-line, st0.tok-col)
       Nothing -> append(st0, child)
 
   fun start-tag-foster(st0: dstate, rawName: string, attrs: list<attr>, selfClosing: bool) : <div,exn> dstate
@@ -1825,9 +1946,9 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
       val stx =
         if !is-html-ns(curNs) && !is-integration-point(curNs, curName) && is-foreign-breakout-element(rawLower) then
           {
-            val st1 = st(st0.stack, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors + 1)
+            val st1 = add-error(st0)
             val stack1 = pop-foreign-elements(st1.stack)
-            st(stack1, st1.imode, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors)
+            st(stack1, st1.imode, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col)
           }
         else st0
 
@@ -1924,7 +2045,7 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
     else InBody
 
   fun with-mode(st0: dstate, m: mode) : dstate
-    st(st0.stack, m, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors)
+    st(st0.stack, m, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors, st0.errlist, st0.tok-line, st0.tok-col)
 
   fun update-mode(st0: dstate) : <div,exn> dstate
     with-mode(st0, mode-from-stack(st0.stack))
@@ -1945,7 +2066,7 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
                 AfterHead -> 2
                 AfterBody -> 2
                 _ -> 1
-            val st1 = add-errors(stx, nulCount * perNull)
+            val st1 = add-errors-code(stx, nulCount * perNull, "unexpected-null-character")
             (st1, TokCharacter(s1))
           }
         _ -> (stx, t0)
@@ -1995,7 +2116,7 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
                 val st1 = add-error(st00)
                 val stack1 = pop-foreign-elements(st1.stack)
                 // Reprocess the token in the current insertion mode (now in HTML namespace).
-                (st(stack1, st1.imode, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True)
+                (st(stack1, st1.imode, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col), True)
               }
             else
               (start-tag(st00, name, attrs, selfClosing), False)
@@ -2022,32 +2143,32 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
               // Treat "non-HTML5" doctypes as parse errors (covers html5lib's `unknown-doctype` bucket).
               val isHtml5 = (!forceQuirks && lower-ascii-string(name) == "html" && publicId == Nothing && systemId == Nothing)
               val st1 = if isHtml5 then st00 else add-error(st00)
-              (append(st(st1.stack, BeforeHtml, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors),
+              (append(st(st1.stack, BeforeHtml, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col),
                       TDoctype(Doctype(name, publicId, systemId, forceQuirks))), False)
             }
           TokComment(data) -> (append(st00, TComment(data)), False)
           TokCharacter(s) ->
             if is-ws(s) then (st00, False)
-            else (st(st00.stack, BeforeHtml, st00.html-inserted, st00.head-inserted, st00.body-inserted, st00.errors), True)
+            else (st(st00.stack, BeforeHtml, st00.html-inserted, st00.head-inserted, st00.body-inserted, st00.errors, st00.errlist, st00.tok-line, st00.tok-col), True)
           TokEOF ->
-            (st(st00.stack, BeforeHtml, st00.html-inserted, st00.head-inserted, st00.body-inserted, st00.errors), False)
+            (st(st00.stack, BeforeHtml, st00.html-inserted, st00.head-inserted, st00.body-inserted, st00.errors, st00.errlist, st00.tok-line, st00.tok-col), False)
           _ ->
-            (st(st00.stack, BeforeHtml, st00.html-inserted, st00.head-inserted, st00.body-inserted, st00.errors), True)
+            (st(st00.stack, BeforeHtml, st00.html-inserted, st00.head-inserted, st00.body-inserted, st00.errors, st00.errlist, st00.tok-line, st00.tok-col), True)
       BeforeHtml ->
         match t00
           TokComment(data) -> (append(st00, TComment(data)), False)
           TokCharacter(s) ->
             if is-ws(s) then (st00, False)
-            else { val st1 = ensure-html(st00, Nil); (st(st1.stack, BeforeHead, True, st1.head-inserted, st1.body-inserted, st1.errors), True) }
+            else { val st1 = ensure-html(st00, Nil); (st(st1.stack, BeforeHead, True, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col), True) }
           TokStartTag(name, attrs, _) ->
             if name == "html" then
-              { val st1 = ensure-html(st00, attrs); (st(st1.stack, BeforeHead, True, st1.head-inserted, st1.body-inserted, st1.errors), False) }
+              { val st1 = ensure-html(st00, attrs); (st(st1.stack, BeforeHead, True, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col), False) }
             else
-              { val st1 = ensure-html(st00, Nil); (st(st1.stack, BeforeHead, True, st1.head-inserted, st1.body-inserted, st1.errors), True) }
+              { val st1 = ensure-html(st00, Nil); (st(st1.stack, BeforeHead, True, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col), True) }
           TokEndTag(_) ->
-            { val st1 = ensure-html(st00, Nil); (st(st1.stack, BeforeHead, True, st1.head-inserted, st1.body-inserted, st1.errors), True) }
+            { val st1 = ensure-html(st00, Nil); (st(st1.stack, BeforeHead, True, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col), True) }
           TokEOF ->
-            { val st1 = ensure-html(st00, Nil); (st(st1.stack, BeforeHead, True, st1.head-inserted, st1.body-inserted, st1.errors), True) }
+            { val st1 = ensure-html(st00, Nil); (st(st1.stack, BeforeHead, True, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col), True) }
           TokDoctype(_,_,_,_) ->
             (st00, False)
       BeforeHead ->
@@ -2056,25 +2177,25 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
           TokCharacter(s) ->
             if is-ws(s) then (st0, False)
             else
-              { val st1 = ensure-head(st0, Nil); (st(st1.stack, InHead, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True) }
+              { val st1 = ensure-head(st0, Nil); (st(st1.stack, InHead, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col), True) }
           TokStartTag(name, attrs, _) ->
             if name == "head" then
-              { val st1 = ensure-head(st0, attrs); (st(st1.stack, InHead, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False) }
+              { val st1 = ensure-head(st0, attrs); (st(st1.stack, InHead, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col), False) }
             elif name == "html" then
               {
                 val st1 = ensure-html(st0, Nil)
                 val st2 = if st0.html-inserted then merge-html-attrs(add-error(st1), attrs) else ensure-html(st0, attrs)
-                (st(st2.stack, BeforeHead, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors), False)
+                (st(st2.stack, BeforeHead, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors, st2.errlist, st2.tok-line, st2.tok-col), False)
               }
             else
-              { val st1 = ensure-head(st0, Nil); (st(st1.stack, InHead, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True) }
+              { val st1 = ensure-head(st0, Nil); (st(st1.stack, InHead, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col), True) }
           TokEndTag(name) ->
             if name == "head" || name == "body" || name == "html" || name == "br" then
-              { val st1 = ensure-head(st0, Nil); (st(st1.stack, InHead, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True) }
+              { val st1 = ensure-head(st0, Nil); (st(st1.stack, InHead, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col), True) }
             else
               (add-error(st0), False)
           TokEOF ->
-            { val st1 = ensure-head(st0, Nil); (st(st1.stack, InHead, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True) }
+            { val st1 = ensure-head(st0, Nil); (st(st1.stack, InHead, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col), True) }
           TokDoctype(_,_,_,_) ->
             (st0, False)
       InHead ->
@@ -2086,12 +2207,12 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
               else
                 (add-error(st0), False)
             elif name == "head" then
-              { val stack1 = pop-to(st0.stack, "head"); (st(stack1, AfterHead, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors), False) }
+              { val stack1 = pop-to(st0.stack, "head"); (st(stack1, AfterHead, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors, st0.errlist, st0.tok-line, st0.tok-col), False) }
             elif name == "body" || name == "html" then
-              { val stack1 = pop-to(st0.stack, "head"); (st(stack1, AfterHead, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors), True) }
+              { val stack1 = pop-to(st0.stack, "head"); (st(stack1, AfterHead, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors, st0.errlist, st0.tok-line, st0.tok-col), True) }
             elif name == "br" then
               // Used by html5lib's </br> in <head><noscript>... case; don't double-count errors here.
-              { val stack1 = pop-to(st0.stack, "head"); (st(stack1, AfterHead, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors), True) }
+              { val stack1 = pop-to(st0.stack, "head"); (st(stack1, AfterHead, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors, st0.errlist, st0.tok-line, st0.tok-col), True) }
             else if has-open(st0.stack, name) then
               (end-tag(st0, name), False)
             else
@@ -2102,20 +2223,24 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
             elif name == "html" then
               {
                 val st1 = merge-html-attrs(add-error(st0), attrs)
-                (st(st1.stack, InHead, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False)
+                (st(st1.stack, InHead, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col), False)
               }
             elif name == "head" then (add-error(st0), False)
             elif name == "body" then
               {
                 val stack1 = pop-to(st0.stack, "head")
-                val st1 = ensure-body(st(stack1, InBody, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors), attrs)
-                (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False)
+                val st1 =
+                  ensure-body(
+                    st(stack1, InBody, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors, st0.errlist, st0.tok-line, st0.tok-col),
+                    attrs
+                  )
+                (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col), False)
               }
             elif name == "noscript" then
               {
                 val st1 = start-tag(st0, name, attrs, selfClosing)
                 if !scriptingEnabled then
-                  (st(st1.stack, InHeadNoscript, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False)
+                  (st(st1.stack, InHeadNoscript, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col), False)
                 else
                   (st1, False)
               }
@@ -2124,7 +2249,7 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
             elif name == "base" || name == "basefont" || name == "bgsound" || name == "link" || name == "meta" then
               (start-tag(st0, name, attrs, selfClosing), False)
             else
-              { val stack1 = pop-to(st0.stack, "head"); (st(stack1, AfterHead, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors), True) }
+              { val stack1 = pop-to(st0.stack, "head"); (st(stack1, AfterHead, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors, st0.errlist, st0.tok-line, st0.tok-col), True) }
           TokCharacter(s) ->
             if in-template-content(st0.stack) then
               (append(st0, TText(s)), False)
@@ -2147,7 +2272,7 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
                       else
                         {
                           val stack1 = pop-to(st1.stack, "head")
-                          val st2 = st(stack1, AfterHead, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors)
+                          val st2 = st(stack1, AfterHead, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col)
                           // Handle the remainder as if we were in `AfterHead` without relying on `reprocess`,
                           // since `reprocess` can only reprocess the *original* token.
                           if is-ws(rest0) then
@@ -2155,13 +2280,13 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
                           else
                             {
                               val st3 = ensure-body(st2, Nil)
-                              val st4 = st(st3.stack, InBody, st3.html-inserted, st3.head-inserted, st3.body-inserted, st3.errors)
+                              val st4 = st(st3.stack, InBody, st3.html-inserted, st3.head-inserted, st3.body-inserted, st3.errors, st3.errlist, st3.tok-line, st3.tok-col)
                               (append(st4, TText(rest0)), False)
                             }
                         }
                     }
                   else
-                    { val stack1 = pop-to(st0.stack, "head"); (st(stack1, AfterHead, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors), True) }
+                    { val stack1 = pop-to(st0.stack, "head"); (st(stack1, AfterHead, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors, st0.errlist, st0.tok-line, st0.tok-col), True) }
                 }
             }
           TokComment(data) -> (append(st0, TComment(data)), False)
@@ -2170,16 +2295,20 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
             {
               val st1 = add-eof-error(st0)
               val stack1 = pop-to(st1.stack, "head")
-              (st(stack1, AfterHead, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True)
+              (st(stack1, AfterHead, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col), True)
             }
       InHeadNoscript ->
         match t
           TokEndTag(name) ->
             if name == "noscript" then
-              { val st1 = end-tag(st0, "noscript"); (st(st1.stack, InHead, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False) }
+              { val st1 = end-tag(st0, "noscript"); (st(st1.stack, InHead, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col), False) }
             elif name == "br" then
               // Not allowed in this context; treat as if it were in the body (via reprocess).
-              { val stack1 = pop-to(st0.stack, "noscript"); (st(stack1, InHead, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors + 1), True) }
+              {
+                val stack1 = pop-to(st0.stack, "noscript")
+                val st1 = add-error(st0)
+                (st(stack1, InHead, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col), True)
+              }
             elif has-open(st0.stack, name) then
               (end-tag(st0, name), False)
             else
@@ -2189,14 +2318,14 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
             if name == "html" then
               {
                 val st1 = merge-html-attrs(add-error(st0), attrs)
-                (st(st1.stack, InHeadNoscript, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False)
+                (st(st1.stack, InHeadNoscript, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col), False)
               }
             elif name == "head" || name == "noscript" then (add-error(st0), False)
             elif name == "base" || name == "basefont" || name == "bgsound" || name == "link" || name == "meta" || name == "noframes" || name == "style" then
               // "Process using the rules for InHead" without changing the insertion mode.
               (start-tag(st0, name, attrs, selfClosing), False)
             else
-              { val stack1 = pop-to(st0.stack, "noscript"); (st(stack1, InHead, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors + 1), True) }
+              { val stack1 = pop-to(st0.stack, "noscript"); val st1 = add-error(st0); (st(stack1, InHead, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col), True) }
           TokCharacter(s) ->
             if is-ws(s) then
               (append(st0, TText(s)), False)
@@ -2207,7 +2336,7 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
                 if nm == "style" || nm == "noframes" then
                   (append(st0, TText(s)), False)
                 else
-                  { val stack1 = pop-to(st0.stack, "noscript"); (st(stack1, InHead, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors + 1), True) }
+                  { val stack1 = pop-to(st0.stack, "noscript"); val st1 = add-error(st0); (st(stack1, InHead, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col), True) }
               }
           TokComment(data) -> (append(st0, TComment(data)), False)
           TokDoctype(_,_,_,_) -> (add-error(st0), False)
@@ -2226,7 +2355,7 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
               elif is-ws(s) then
                 (append(st0, TText(s)), False)
               else
-                { val st1 = ensure-body(st0, Nil); (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True) }
+                { val st1 = ensure-body(st0, Nil); (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col), True) }
             }
           TokStartTag(name, attrs, selfClosing) ->
             if name == "head" then
@@ -2235,13 +2364,13 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
               {
                 // Parse error, but still insert <title> into the (still-open) head and parse its contents.
                 val st1 = start-tag(add-error(st0), name, attrs, selfClosing)
-                (st(st1.stack, AfterHead, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False)
+                (st(st1.stack, AfterHead, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col), False)
               }
             elif name == "style" || name == "script" then
               {
                 val node = TEl(name, Html, adjust-attrs(Html, attrs), Nil)
                 val st1 = append-into-head(add-error(st0), node)
-                (st(st1.stack, AfterHead, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False)
+                (st(st1.stack, AfterHead, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col), False)
               }
             elif name == "frameset" then
               {
@@ -2252,21 +2381,21 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
                 // while avoiding regressions in frameset-first inputs.
                 val stx = if st0.errors > 0 then add-error(st0) else st0
                 val st1 = start-tag(stx, name, attrs, False)
-                (st(st1.stack, InFrameset, st1.html-inserted, st1.head-inserted, True, st1.errors), False)
+                (st(st1.stack, InFrameset, st1.html-inserted, st1.head-inserted, True, st1.errors, st1.errlist, st1.tok-line, st1.tok-col), False)
               }
             elif name == "body" then
-              { val st1 = ensure-body(st0, attrs); (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False) }
+              { val st1 = ensure-body(st0, attrs); (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col), False) }
             else
-              { val st1 = ensure-body(st0, Nil); (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True) }
+              { val st1 = ensure-body(st0, Nil); (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col), True) }
           TokEndTag(name) ->
             if name == "title" && has-open(st0.stack, "title") then
               match st0.stack
                 Cons(top, rest) ->
                   {
                     val node = close-frame(top)
-                    val st1 = st(rest, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors)
+                    val st1 = st(rest, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors, st0.errlist, st0.tok-line, st0.tok-col)
                     val st2 = append-into-head(st1, node)
-                    (st(st2.stack, AfterHead, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors), False)
+                    (st(st2.stack, AfterHead, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors, st2.errlist, st2.tok-line, st2.tok-col), False)
                   }
                 _ -> (end-tag(st0, "title"), False)
             elif name == "style" || name == "script" then
@@ -2276,12 +2405,12 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
             elif name == "head" then
               (add-error(st0), False)
             elif name == "body" || name == "html" || name == "br" then
-              { val st1 = ensure-body(st0, Nil); (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True) }
+              { val st1 = ensure-body(st0, Nil); (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col), True) }
             else
               (add-error(st0), False)
           TokDoctype(_,_,_,_) -> (st0, False)
           TokEOF ->
-            { val st1 = ensure-body(st0, Nil); (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True) }
+            { val st1 = ensure-body(st0, Nil); (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col), True) }
       InBody ->
         match t
           TokStartTag(name, attrs, selfClosing) ->
@@ -2296,12 +2425,12 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
                       val curName = lower-ascii-string(curName0)
                       val st1 =
                         if curName == "option" && (nextName == "hr" || nextName == "option" || nextName == "optgroup") then
-                          st(pop-to(stx.stack, "option"), stx.imode, stx.html-inserted, stx.head-inserted, stx.body-inserted, stx.errors)
+                          st(pop-to(stx.stack, "option"), stx.imode, stx.html-inserted, stx.head-inserted, stx.body-inserted, stx.errors, stx.errlist, stx.tok-line, stx.tok-col)
                         else stx
                       val (curName1, _curNs1, _curAttrs1) = current-element(st1.stack)
                       val cur2 = lower-ascii-string(curName1)
                       if cur2 == "optgroup" && (nextName == "hr" || nextName == "optgroup") then
-                        st(pop-to(st1.stack, "optgroup"), st1.imode, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors)
+                        st(pop-to(st1.stack, "optgroup"), st1.imode, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col)
                       else st1
                     }
                 }
@@ -2310,7 +2439,7 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
               if name == "html" then
                 {
                   val st1 = merge-html-attrs(add-error(stx), attrs)
-                  (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False)
+                  (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col), False)
                 }
               elif has-open(stx.stack, "select")
                    && is-one-of(
@@ -2333,7 +2462,7 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
                 {
                   // Merge new attributes (without overwriting) into the existing <body>.
                   val st1 = merge-body-attrs(add-error(stx), attrs)
-                  (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False)
+                  (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col), False)
                 }
               elif name == "rp" || name == "rt" then
                 {
@@ -2365,7 +2494,7 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
                     else
                       {
                         val stack1 = pop-to(stx0.stack, target)
-                        st(stack1, stx0.imode, stx0.html-inserted, stx0.head-inserted, stx0.body-inserted, stx0.errors)
+                        st(stack1, stx0.imode, stx0.html-inserted, stx0.head-inserted, stx0.body-inserted, stx0.errors, stx0.errlist, stx0.tok-line, stx0.tok-col)
                       }
 
                   val st1 =
@@ -2390,7 +2519,10 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
                   // If a <button> is already in scope, close it before inserting a new one.
                   val st1 =
                     if has-in-scope(stx.stack, "button") then
-                      st(pop-to(add-error(stx).stack, "button"), stx.imode, stx.html-inserted, stx.head-inserted, stx.body-inserted, stx.errors + 1)
+                      {
+                        val st2 = add-error(stx)
+                        st(pop-to(st2.stack, "button"), st2.imode, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors, st2.errlist, st2.tok-line, st2.tok-col)
+                      }
                     else
                       stx
                   (start-tag(st1, name, attrs, selfClosing), False)
@@ -2406,7 +2538,7 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
                     if is-html-ns(curNs0) && is-heading-element(curLow) then
                       {
                         val ste = add-error(stp)
-                        st(pop-to(ste.stack, curLow), ste.imode, ste.html-inserted, ste.head-inserted, ste.body-inserted, ste.errors)
+                        st(pop-to(ste.stack, curLow), ste.imode, ste.html-inserted, ste.head-inserted, ste.body-inserted, ste.errors, ste.errlist, ste.tok-line, ste.tok-col)
                       }
                     else
                       stp
@@ -2439,7 +2571,7 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
                         val stp =
                           if adj == "table" && !selfClosing && inIntegration then
                             if has-in-button-scope(stx.stack, "p") then
-                              st(pop-to(stx.stack, "p"), stx.imode, stx.html-inserted, stx.head-inserted, stx.body-inserted, stx.errors)
+                              st(pop-to(stx.stack, "p"), stx.imode, stx.html-inserted, stx.head-inserted, stx.body-inserted, stx.errors, stx.errlist, stx.tok-line, stx.tok-col)
                             else stx
                           else stx
                         close-p-if-needed(stp, adj)
@@ -2447,7 +2579,7 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
                     else stx
                   val st2 = start-tag(st1, name, attrs, selfClosing)
                   if is-html-ns(ns) && adj == "table" && !selfClosing then
-                    (st(st2.stack, InTable, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors), False)
+                    (st(st2.stack, InTable, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors, st2.errlist, st2.tok-line, st2.tok-col), False)
                   else
                     (st2, False)
                 }
@@ -2519,21 +2651,21 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
                       // After the <html>/<body> elements have already been closed into the document,
                       // html5lib expects stray </body> to be ignored without counting an extra error.
                       if top-is-doc(st0x.stack) then
-                        (st(st0x.stack, AfterAfterBody, st0x.html-inserted, st0x.head-inserted, st0x.body-inserted, st0x.errors), False)
+                        (st(st0x.stack, AfterAfterBody, st0x.html-inserted, st0x.head-inserted, st0x.body-inserted, st0x.errors, st0x.errlist, st0x.tok-line, st0x.tok-col), False)
                       else
                         {
                           // Per spec/html5lib: do not pop <body> here; just switch modes.
                           val st0i = generate-implied-end-tags(st0x, "")
                           val (curName1, _curNs, _curAttrs) = current-element(st0i.stack)
                           val stx = if lower-ascii-string(curName1) == "body" then st0i else add-error(st0i)
-                          (st(stx.stack, AfterBody, stx.html-inserted, stx.head-inserted, stx.body-inserted, stx.errors), False)
+                          (st(stx.stack, AfterBody, stx.html-inserted, stx.head-inserted, stx.body-inserted, stx.errors, stx.errlist, stx.tok-line, stx.tok-col), False)
                         }
                     }
                   elif name == "html" then
                     if top-is-doc(st0x.stack) then
                       // After the <html> element has already been closed, a stray </html> should transition
                       // back to AfterAfterBody so trailing comments can attach to the document.
-                      (st(st0x.stack, AfterAfterBody, st0x.html-inserted, st0x.head-inserted, st0x.body-inserted, st0x.errors), False)
+                      (st(st0x.stack, AfterAfterBody, st0x.html-inserted, st0x.head-inserted, st0x.body-inserted, st0x.errors, st0x.errlist, st0x.tok-line, st0x.tok-col), False)
                     else
                       (st0x, False)
                   elif name == "br" then
@@ -2559,7 +2691,7 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
                           Just(hname) ->
                             {
                               val stack1 = pop-to(stx.stack, hname)
-                              (st(stack1, stx.imode, stx.html-inserted, stx.head-inserted, stx.body-inserted, stx.errors), False)
+                              (st(stack1, stx.imode, stx.html-inserted, stx.head-inserted, stx.body-inserted, stx.errors, stx.errlist, stx.tok-line, stx.tok-col), False)
                             }
                           _ ->
                             // Defensive fallback; shouldn't happen since `has-heading-in-scope` was true.
@@ -2575,7 +2707,7 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
                       // Treat stray end tags as parse errors (html5lib tree tests count these).
                       {
                         val n = if is-html-ns(curNs) then 1 else 2
-                        (st(st0x.stack, st0x.imode, st0x.html-inserted, st0x.head-inserted, st0x.body-inserted, st0x.errors + n), False)
+                        (add-errors(st0x, n), False)
                       }
                 }
             }
@@ -2596,7 +2728,10 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
         match t
           TokStartTag(name, attrs, selfClosing) ->
             if name == "frameset" then
-              (st(start-tag(st0, name, attrs, selfClosing).stack, InFrameset, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors), False)
+              {
+                val st1 = start-tag(st0, name, attrs, selfClosing)
+                (st(st1.stack, InFrameset, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col), False)
+              }
             elif name == "frame" then
               (start-tag(st0, name, attrs, True), False)
             else
@@ -2677,7 +2812,7 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
                   {
                     val st1 = end-tag(st0, "frameset")
                     val m = if has-open(st1.stack, "frameset") then InFrameset else AfterFrameset
-                    (st(st1.stack, m, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False)
+                    (st(st1.stack, m, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col), False)
                   }
               else
                 (add-error(st0), False)
@@ -2710,7 +2845,7 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
             if name == "html" then
               {
                 val st1 = end-tag(st0, "html")
-                (st(st1.stack, AfterAfterFrameset, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False)
+                (st(st1.stack, AfterAfterFrameset, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col), False)
               }
             else
               (add-error(st0), False)
@@ -2775,14 +2910,14 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
               {
                 // In select-in-table contexts, close the <select> (foster-parented) before processing other table-structure tokens.
                 val stack1 = pop-to-select-foster(st0.stack)
-                val st1 = st(stack1, InTable, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors)
+                val st1 = st(stack1, InTable, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors, st0.errlist, st0.tok-line, st0.tok-col)
                 (st1, True)
               }
             elif has-open(st0.stack, "caption") && (name == "tr" || is-table-section(name) || is-table-cell(name)) then
               {
                 // If a <caption> element is open, close it before handling table-structure tokens.
                 val st1 = end-tag(st0, "caption")
-                (st(st1.stack, InTable, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True)
+                (st(st1.stack, InTable, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col), True)
               }
             elif name == "table" then
               {
@@ -2808,22 +2943,26 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
                     val st1 = add-error(st0)
                     // If a <select> is open, close it (foster-parented) first so it ends up before the table.
                     val stack1 = if has-open(st1.stack, "select") then pop-to-select-foster(st1.stack) else st1.stack
-                    val st2 = end-tag(st(stack1, st1.imode, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), "table")
-                    (st(st2.stack, InBody, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors), True)
+                    val st2 =
+                      end-tag(
+                        st(stack1, st1.imode, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col),
+                        "table"
+                      )
+                    (st(st2.stack, InBody, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors, st2.errlist, st2.tok-line, st2.tok-col), True)
                   }
               }
             elif name == "colgroup" then
               {
                 val stc = clear-back-to-table-context(st0)
                 val st1 = start-tag(stc, name, attrs, selfClosing)
-                (st(st1.stack, InColumnGroup, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False)
+                (st(st1.stack, InColumnGroup, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col), False)
               }
             elif name == "col" then
               {
                 val stc = clear-back-to-table-context(st0)
                 // Insert an implied <colgroup> and reprocess the <col> token in InColumnGroup.
                 val st1 = start-tag(stc, "colgroup", Nil, False)
-                (st(st1.stack, InColumnGroup, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True)
+                (st(st1.stack, InColumnGroup, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col), True)
               }
             elif name == "caption" then
               (start-tag(clear-back-to-table-context(st0), name, attrs, selfClosing), False)
@@ -2843,14 +2982,20 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
               {
                 val stc = clear-back-to-table-context(st0)
                 val st1 = start-tag(stc, name, attrs, selfClosing)
-                (st(st1.stack, InTableBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False)
+                (st(st1.stack, InTableBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col), False)
               }
             elif name == "tr" then
               {
                 val stc = clear-back-to-table-context(st0)
                 val st1 = ensure-tbody(stc)
-                val st2 = start-tag(st(st1.stack, InTableBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), name, attrs, selfClosing)
-                (st(st2.stack, InRow, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors), False)
+                val st2 =
+                  start-tag(
+                    st(st1.stack, InTableBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col),
+                    name,
+                    attrs,
+                    selfClosing
+                  )
+                (st(st2.stack, InRow, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors, st2.errlist, st2.tok-line, st2.tok-col), False)
               }
             elif is-table-cell(name) then
               {
@@ -2858,8 +3003,14 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
                 val st1 = add-error(stc)
                 val st2 = ensure-tbody(st1)
                 val st3 = ensure-tr(st2)
-                val st4 = start-tag(st(st3.stack, InRow, st3.html-inserted, st3.head-inserted, st3.body-inserted, st3.errors), name, attrs, selfClosing)
-                (st(st4.stack, InCell, st4.html-inserted, st4.head-inserted, st4.body-inserted, st4.errors), False)
+                val st4 =
+                  start-tag(
+                    st(st3.stack, InRow, st3.html-inserted, st3.head-inserted, st3.body-inserted, st3.errors, st3.errlist, st3.tok-line, st3.tok-col),
+                    name,
+                    attrs,
+                    selfClosing
+                  )
+                (st(st4.stack, InCell, st4.html-inserted, st4.head-inserted, st4.body-inserted, st4.errors, st4.errlist, st4.tok-line, st4.tok-col), False)
               }
             elif name == "option" then
               (start-tag(add-error(st0), name, attrs, selfClosing), False)
@@ -2951,7 +3102,7 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
                   // (for foster-parenting "table voodoo"), and if the end tag is still unexpected it
                   // counts an additional "unexpected end tag" error.
                   if is-tableish(name) then
-                    (st(st0.stack, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors + 1), False)
+                    (add-error(st0), False)
                   elif has-open(st0.stack, name) then
                     {
                       // For foreign content (SVG/MathML), don't charge an extra table-mode error when closing
@@ -2974,7 +3125,7 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
                 // In table contexts, </select> is a parse error but still closes the <select> (foster-parented).
                 val st1 = add-error(st0)
                 val stack1 = pop-to-select-foster(st1.stack)
-                val st2 = st(stack1, st1.imode, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors)
+                val st2 = st(stack1, st1.imode, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col)
                 (update-mode(st2), False)
               }
             elif name == "table" then
@@ -2998,11 +3149,11 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
                     // In select-in-table-like cases, close <select> first (foster-parented), then reprocess </table>.
                     // html5lib doesn't count an extra error for this </table> (see `tables01.dat` #8).
                     val stack1 = pop-to-select-foster(st0.stack)
-                    val st2 = st(stack1, InTable, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors)
+                    val st2 = st(stack1, InTable, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors, st0.errlist, st0.tok-line, st0.tok-col)
                     (st2, True)
                   }
                 else
-                  { val st1 = end-tag(st0, "table"); (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False) }
+                  { val st1 = end-tag(st0, "table"); (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col), False) }
               }
             else
               {
@@ -3024,7 +3175,7 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
                       { val st1 = adoption-end-tag(st0, name); (update-mode(st1), False) }
                     else
                       // html5lib counts 2 errors here ("unexpected-end-tag-implies-table-voodoo" + "unexpected-end-tag").
-                      (st(st0.stack, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors + 2), False)
+                      (add-errors(st0, 2), False)
                   else
                     if is-tableish(name) then
                       // Table-scoped end tags that match an open element are handled normally.
@@ -3060,7 +3211,7 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
               {
                 // html5lib: foster-parented characters in table contexts are parse errors (often counted per character).
                 val n = string/vector(s).length
-                val st1 = st(st0.stack, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors + n)
+                val st1 = add-errors(st0, n)
                 (foster-append(st1, TText(s)), False)
               }
           TokComment(data) -> (append(st0, TComment(data)), False)
@@ -3078,7 +3229,7 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
                   {
                     // In select-in-table contexts, close the <select> (foster-parented) before processing table-structure tokens.
                     val stack1 = pop-to-select-foster(st0.stack)
-                    val st1 = st(stack1, InTableBody, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors)
+                    val st1 = st(stack1, InTableBody, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors, st0.errlist, st0.tok-line, st0.tok-col)
                     (st1, True)
                   }
                 else
@@ -3114,25 +3265,31 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
                           elif has-open(st1.stack, "thead") then end-tag(st1, "thead")
                           elif has-open(st1.stack, "tfoot") then end-tag(st1, "tfoot")
                           else st1
-                        (st(st2.stack, InTable, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors), True)
+                        (st(st2.stack, InTable, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors, st2.errlist, st2.tok-line, st2.tok-col), True)
                       }
                     elif name == "tr" then
-                      { val st1 = start-tag(st0, name, attrs, selfClosing); (st(st1.stack, InRow, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False) }
+                      { val st1 = start-tag(st0, name, attrs, selfClosing); (st(st1.stack, InRow, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col), False) }
                     elif is-table-cell(name) then
                       {
                         val st1 = add-error(st0)
                         val st2 = ensure-tr(st1)
-                        val st3 = start-tag(st(st2.stack, InRow, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors), name, attrs, selfClosing)
-                        (st(st3.stack, InCell, st3.html-inserted, st3.head-inserted, st3.body-inserted, st3.errors), False)
+                        val st3 =
+                          start-tag(
+                            st(st2.stack, InRow, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors, st2.errlist, st2.tok-line, st2.tok-col),
+                            name,
+                            attrs,
+                            selfClosing
+                          )
+                        (st(st3.stack, InCell, st3.html-inserted, st3.head-inserted, st3.body-inserted, st3.errors, st3.errlist, st3.tok-line, st3.tok-col), False)
                       }
                     elif is-table-section(name) then
                       {
                         val st1 = close-row(st0)
                         val st2 = end-tag(st1, name)
-                        (st(st2.stack, InTable, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors), True)
+                        (st(st2.stack, InTable, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors, st2.errlist, st2.tok-line, st2.tok-col), True)
                       }
                     elif name == "table" then
-                      { val st1 = add-error(st0); (st(st1.stack, InTable, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True) }
+                      { val st1 = add-error(st0); (st(st1.stack, InTable, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col), True) }
                     else
                       {
                         // In table-body contexts, foreign tags are parse errors but should still be inserted.
@@ -3147,14 +3304,14 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
               if has-open(st0.stack, name) then
                 { val st1 = end-tag(st0, name); (update-mode(st1), False) }
               else
-                (st(st0.stack, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors + 1), False)
+                (add-error(st0), False)
             elif name == "html" || name == "body" then
               (add-error(st0), False)
             elif is-table-section(name) then
               if has-open(st0.stack, name) then
-                { val st1 = end-tag(st0, name); (st(st1.stack, InTable, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False) }
+                { val st1 = end-tag(st0, name); (st(st1.stack, InTable, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col), False) }
               else
-                (st(st0.stack, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors + 1), False)
+                (add-error(st0), False)
             elif name == "table" then
               {
                 val (curNm0, curNs0, _curAttrs) = current-element(st0.stack)
@@ -3168,13 +3325,13 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
                   // Ignore </table> at an integration point when no table is actually open.
                   (add-error(st0), False)
                 else
-                  { val st1 = close-row(st0); val st2 = end-tag(st1, "tbody"); (st(st2.stack, InTable, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors), True) }
+                  { val st1 = close-row(st0); val st2 = end-tag(st1, "tbody"); (st(st2.stack, InTable, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors, st2.errlist, st2.tok-line, st2.tok-col), True) }
               }
             else
               if has-open(st0.stack, name) then
                 { val st1 = end-tag(st0, name); (update-mode(st1), False) }
               else
-                (st(st0.stack, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors + 1), False)
+                (add-error(st0), False)
           TokCharacter(s) ->
             if is-ws(s) || in-template-content(st0.stack) || !foster-needed(st0.stack) then
               (append(st0, TText(s)), False)
@@ -3197,25 +3354,25 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
             elif name == "template" then
               (start-tag(st0, name, attrs, selfClosing), False)
             else
-              { val st1 = add-error(st0); val st2 = end-tag(st1, "colgroup"); (st(st2.stack, InTable, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors), True) }
+              { val st1 = add-error(st0); val st2 = end-tag(st1, "colgroup"); (st(st2.stack, InTable, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors, st2.errlist, st2.tok-line, st2.tok-col), True) }
           TokEndTag(name) ->
             if in-template-content(st0.stack) then
               if has-open(st0.stack, name) then
                 { val st1 = end-tag(st0, name); (update-mode(st1), False) }
               else
-                (st(st0.stack, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors + 1), False)
+                (add-error(st0), False)
             elif name == "html" || name == "body" then
               // Don't allow these end tags to close the actual <html>/<body> element from inside table modes.
               (add-error(st0), False)
             elif name == "colgroup" then
-              { val st1 = end-tag(st0, "colgroup"); (st(st1.stack, InTable, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False) }
+              { val st1 = end-tag(st0, "colgroup"); (st(st1.stack, InTable, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col), False) }
             elif name == "table" then
-              { val st1 = end-tag(st0, "colgroup"); (st(st1.stack, InTable, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True) }
+              { val st1 = end-tag(st0, "colgroup"); (st(st1.stack, InTable, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col), True) }
             else
               if has-open(st0.stack, name) then
                 { val st1 = end-tag(st0, name); (update-mode(st1), False) }
               else
-                (st(st0.stack, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors + 1), False)
+                (add-error(st0), False)
           TokCharacter(s) ->
             if is-ws(s) then
               (append(st0, TText(s)), False)
@@ -3223,7 +3380,7 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
               {
                 // Non-whitespace characters in a colgroup context should be handled as if in-table.
                 val st1 = end-tag(st0, "colgroup")
-                (st(st1.stack, InTable, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True)
+                (st(st1.stack, InTable, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col), True)
               }
           TokComment(data) -> (append(st0, TComment(data)), False)
           TokDoctype(_,_,_,_) -> (add-error(st0), False)
@@ -3240,7 +3397,7 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
                   {
                     // In select-in-table contexts, close the <select> (foster-parented) before processing table-structure tokens.
                     val stack1 = pop-to-select-foster(st0.stack)
-                    val st1 = st(stack1, InRow, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors)
+                    val st1 = st(stack1, InRow, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors, st0.errlist, st0.tok-line, st0.tok-col)
                     (st1, True)
                   }
                 elif name == "select" then
@@ -3268,24 +3425,24 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
                       // Approximate "table mode without a table in scope": ignore table-structure tags here.
                       (add-error(st0), False)
                     elif is-table-cell(name) then
-                      { val st1 = start-tag(st0, name, attrs, selfClosing); (st(st1.stack, InCell, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False) }
+                      { val st1 = start-tag(st0, name, attrs, selfClosing); (st(st1.stack, InCell, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col), False) }
                     elif name == "caption" then
                       {
                         // Close the current row and let table-body mode place `<caption>` correctly.
                         val st1 = end-tag(st0, "tr")
-                        (st(st1.stack, InTableBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True)
+                        (st(st1.stack, InTableBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col), True)
                       }
                     elif name == "tr" then
                       {
                         // Close the current row before starting a new one.
                         val st1 = end-tag(st0, "tr")
-                        (st(st1.stack, InTableBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True)
+                        (st(st1.stack, InTableBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col), True)
                       }
                     elif is-table-section(name) || name == "table" then
                       {
                         val st1 = add-error(st0)
                         val st2 = end-tag(st1, "tr")
-                        (st(st2.stack, InTableBody, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors), True)
+                        (st(st2.stack, InTableBody, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors, st2.errlist, st2.tok-line, st2.tok-col), True)
                       }
                     else
                       {
@@ -3301,18 +3458,18 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
               if has-open(st0.stack, name) then
                 { val st1 = end-tag(st0, name); (update-mode(st1), False) }
               else
-                (st(st0.stack, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors + 1), False)
+                (add-error(st0), False)
             elif name == "html" || name == "body" then
               (add-error(st0), False)
             elif name == "tr" then
-              { val st1 = end-tag(st0, "tr"); (st(st1.stack, InTableBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False) }
+              { val st1 = end-tag(st0, "tr"); (st(st1.stack, InTableBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col), False) }
             elif name == "table" then
-              { val st1 = end-tag(st0, "tr"); (st(st1.stack, InTableBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True) }
+              { val st1 = end-tag(st0, "tr"); (st(st1.stack, InTableBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col), True) }
             else
               if has-open(st0.stack, name) then
                 { val st1 = end-tag(st0, name); (update-mode(st1), False) }
               else
-                (st(st0.stack, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors + 1), False)
+                (add-error(st0), False)
           TokCharacter(s) ->
             if is-ws(s) || in-template-content(st0.stack) || !foster-needed(st0.stack) then
               (append(st0, TText(s)), False)
@@ -3332,7 +3489,7 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
               if has-open(st0.stack, name) then
                 { val st1 = end-tag(st0, name); (update-mode(st1), False) }
               else
-                (st(st0.stack, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors + 1), False)
+                (add-error(st0), False)
             elif name == "html" || name == "body" then
               (add-error(st0), False)
             elif is-table-cell(name) then
@@ -3344,8 +3501,8 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
                   val stx = if has-open-foreign-name(st0.stack, name) then add-error(st0) else st0
 
                   val stack1 = pop-to-html(stx.stack, name)
-                  val st1 = st(stack1, stx.imode, stx.html-inserted, stx.head-inserted, stx.body-inserted, stx.errors)
-                  (st(st1.stack, InRow, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False)
+                  val st1 = st(stack1, stx.imode, stx.html-inserted, stx.head-inserted, stx.body-inserted, stx.errors, stx.errlist, stx.tok-line, stx.tok-col)
+                  (st(st1.stack, InRow, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col), False)
                 }
               else
                 (add-error(st0), False)
@@ -3356,7 +3513,7 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
                 val curLow = lower-ascii-string(curName)
                 val stx = if curLow == "td" || curLow == "th" then st0 else add-error(st0)
                 val st1 = close-cell(stx)
-                (st(st1.stack, InRow, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True)
+                (st(st1.stack, InRow, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col), True)
               }
             else
               if has-open(st0.stack, name) then
@@ -3369,7 +3526,7 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
                 else
                   { val st1 = end-tag(st0, name); (update-mode(st1), False) }
               else
-                (st(st0.stack, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors + 1), False)
+                (add-error(st0), False)
           TokStartTag(name, attrs, selfClosing) ->
             if in-template-content(st0.stack) then
               (start-tag(st0, name, attrs, selfClosing), False)
@@ -3419,7 +3576,7 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
                     val curLow = lower-ascii-string(curName)
                     val st1 = if (name == "td" || name == "th") && curLow != "td" && curLow != "th" then add-error(st0) else st0
                     val st2 = close-cell(st1)
-                    (st(st2.stack, InRow, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors), True)
+                    (st(st2.stack, InRow, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors, st2.errlist, st2.tok-line, st2.tok-col), True)
                   }
                 else
                   (start-tag(st0, name, attrs, selfClosing), False)
@@ -3437,7 +3594,7 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
             // (and other elements) are still open, close them first so the comment becomes a sibling.
             {
               val stack1 = if has-open(st0.stack, "body") then pop-to(st0.stack, "body") else st0.stack
-              val st1 = st(stack1, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors)
+              val st1 = st(stack1, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors, st0.errlist, st0.tok-line, st0.tok-col)
               (append(st1, TComment(data)), False)
             }
           TokCharacter(s) ->
@@ -3447,23 +3604,23 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
             else
               {
                 val st1 = add-error(st0)
-                (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True)
+                (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col), True)
               }
           TokEOF -> (st0, False)
           TokStartTag(name, _attrs, _selfClosing) ->
             if name == "html" then
-              (st(st0.stack, InBody, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors), True)
+              (st(st0.stack, InBody, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors, st0.errlist, st0.tok-line, st0.tok-col), True)
             else
               {
                 val st1 = add-error(st0)
-                (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True)
+                (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col), True)
               }
           TokEndTag(name) ->
             if name == "html" then
               {
                 // Close <html> and switch to "after after body" so trailing comments become document children.
                 val st1 = end-tag(st0, "html")
-                (st(st1.stack, AfterAfterBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False)
+                (st(st1.stack, AfterAfterBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col), False)
               }
             elif name == "br" then
               {
@@ -3476,12 +3633,12 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
             else
               {
                 val st1 = add-error(st0)
-                (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True)
+                (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col), True)
               }
           _ ->
             {
               val st1 = add-error(st0)
-              (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True)
+              (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col), True)
             }
       AfterAfterBody ->
         match t
@@ -3491,24 +3648,25 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
               // html5lib's webkit fixtures expect these stray end tags to be ignored here.
               (st0, False)
             else
-              { val st1 = add-error(st0); (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True) }
+              { val st1 = add-error(st0); (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col), True) }
           TokEOF -> (st0, False)
           TokCharacter(s) ->
             if is-ws(s) then
               // Process whitespace using InBody rules but stay in AfterAfterBody.
-              { val (st1, _rep) = process-inbody(t, st0); (st(st1.stack, AfterAfterBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False) }
+              { val (st1, _rep) = process-inbody(t, st0); (st(st1.stack, AfterAfterBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col), False) }
             else
-              { val st1 = add-error(st0); (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True) }
+              { val st1 = add-error(st0); (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col), True) }
           _ ->
-            { val st1 = add-error(st0); (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True) }
+            { val st1 = add-error(st0); (st(st1.stack, InBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors, st1.errlist, st1.tok-line, st1.tok-col), True) }
 
-  fun process(ts: list<token>, st0: dstate) : <div,exn> dstate
+  fun process(ts: list<tokenizer/tokenloc>, st0: dstate) : <div,exn> dstate
     match ts
       Nil -> st0
-      Cons(t, rest) ->
+      Cons(Tokenloc(t, line, col), rest) ->
         {
-          val (next, reprocess) = process-one(t, st0)
-          if reprocess then process(Cons(t, rest), next) else process(rest, next)
+          val stx = st(st0.stack, st0.imode, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors, st0.errlist, line, col)
+          val (next, reprocess) = process-one(t, stx)
+          if reprocess then process(Cons(Tokenloc(t, line, col), rest), next) else process(rest, next)
         }
 
   val st1 = process(tokens, st0)
@@ -3521,13 +3679,13 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
           {
             val stx = if st2.head-inserted then st2 else ensure-head(st2, Nil)
             if has-open(stx.stack, "head") then
-              st(pop-to(stx.stack, "head"), stx.imode, stx.html-inserted, stx.head-inserted, stx.body-inserted, stx.errors)
+              st(pop-to(stx.stack, "head"), stx.imode, stx.html-inserted, stx.head-inserted, stx.body-inserted, stx.errors, stx.errlist, stx.tok-line, stx.tok-col)
             else
               stx
           }
         if st3.body-inserted then st3
         else
-          { val stx = ensure-body(st3, Nil); st(pop-to(stx.stack, "body"), stx.imode, stx.html-inserted, stx.head-inserted, stx.body-inserted, stx.errors) }
+          { val stx = ensure-body(st3, Nil); st(pop-to(stx.stack, "body"), stx.imode, stx.html-inserted, stx.head-inserted, stx.body-inserted, stx.errors, stx.errlist, stx.tok-line, stx.tok-col) }
       }
 
   fun close-all(stack0: list<frame>) : <div,exn> list<frame>
@@ -3645,11 +3803,11 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
     match close-all(st4.stack)
       Cons(root, _) -> root.children.reverse
       _ -> Nil
-  (closed, st4.errors)
+  (closed, st4.errlist.reverse)
 
-pub fun build-document(tokens: list<token>, scriptingEnabled: bool = True) : <div,exn> (dom, int)
+pub fun build-document(tokens: list<tokenizer/tokenloc>, scriptingEnabled: bool = True) : <div,exn> (dom, list<parseerror>)
   // M2: insertion-mode document builder (partial HTML5).
-  val st0 = Dstate(Cons(Frame(FDoc, Nil), Nil), Initial, False, False, False, Nil, 0)
+  val st0 = Dstate(Cons(Frame(FDoc, Nil), Nil), Initial, False, False, False, Nil, 0, Nil, 1, 1)
   val (children, errs) = run-treebuilder(tokens, st0, scriptingEnabled, True)
   (arena-from-children(Document(Nil, "no-quirks"), children), errs)
 
@@ -3743,7 +3901,7 @@ fun cleanup-fragment-wrappers(children0: list<tnode>, fragCtx: fragmentcontext) 
           _ -> withoutHtml
       }
 
-pub fun build-fragment(tokens: list<token>, fragCtx: fragmentcontext, scriptingEnabled: bool = True) : <div,exn> (dom, int)
+pub fun build-fragment(tokens: list<tokenizer/tokenloc>, fragCtx: fragmentcontext, scriptingEnabled: bool = True) : <div,exn> (dom, list<parseerror>)
   match fragCtx
     Fragmentcontext(tag0, ctxNs) ->
       {
@@ -3763,7 +3921,7 @@ pub fun build-fragment(tokens: list<token>, fragCtx: fragmentcontext, scriptingE
               Cons(Frame(FEl(ctxName, ctxNs, Nil), Nil), Cons(htmlFrame, Cons(rootFrame, Nil)))
             }
 
-        val st0 = Dstate(stack0, fragment-initial-mode(fragCtx), True, False, False, Nil, 0)
+        val st0 = Dstate(stack0, fragment-initial-mode(fragCtx), True, False, False, Nil, 0, Nil, 1, 1)
         val (children0, errs) = run-treebuilder(tokens, st0, scriptingEnabled, False)
         val children = cleanup-fragment-wrappers(children0, fragCtx)
         (arena-from-children(DocumentFragment(Nil, Just(fragCtx)), children), errs)

@@ -230,7 +230,7 @@ fun run-encoding-batch() : <console,div,exn> ()
 
   json/arr(go(0, Nil)).println
 
-fun saw-leading-doctype(ts: list<tokenizer/token>) : <div,exn> bool
+fun saw-leading-doctype(ts: list<tokenizer/tokenloc>) : <div,exn> bool
   fun is-ws-only(s: string) : <div,exn> bool
     val cs = string/vector(s)
     var ok := True
@@ -244,7 +244,7 @@ fun saw-leading-doctype(ts: list<tokenizer/token>) : <div,exn> bool
 
   match ts
     Nil -> False
-    Cons(t, rest) ->
+    Cons(Tokenloc(t, _line, _col), rest) ->
       match t
         TokDoctype(_,_,_,_) -> True
         TokComment(_) -> saw-leading-doctype(rest)
@@ -258,14 +258,14 @@ fun run-tree-debug(args: list<string>) : <console,fsys,div,exn> ()
   val input = read-text-file(path(pathStr))
   val scripting = (scriptArg != "off")
   val (tokens, tokErrors) = tokenizer/tokenize-for-parse(input, Data, Nothing, scripting)
-  val (dom0, treeErrCount) = treebuilder/build-document(tokens, scripting)
+  val (dom0, treeErrs) = treebuilder/build-document(tokens, scripting)
   val missing = if saw-leading-doctype(tokens) then 0 else 1
   val out =
     json/obj([
       ("tokenizer_errors", int/show(tokErrors.length)),
-      ("treebuilder_errors", int/show(treeErrCount)),
+      ("treebuilder_errors", int/show(treeErrs.length)),
       ("missing_doctype_injected", int/show(missing)),
-      ("total_errors", int/show(tokErrors.length + treeErrCount + missing)),
+      ("total_errors", int/show(tokErrors.length + treeErrs.length + missing)),
       ("tree", json/escape-string(html5/to-test-format(dom0))),
     ])
   out.println

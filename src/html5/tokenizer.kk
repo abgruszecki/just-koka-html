@@ -23,6 +23,8 @@ pub type token {
   TokEOF
 }
 
+pub struct tokenloc(tok: token, line: int, col: int)
+
 pub alias parseerror = errors/parseerror
 
 type st {
@@ -365,7 +367,7 @@ fun consume-rawtext-endtag(cs: vector<char>, pos: int, lastStartTag: maybe<strin
 // M1: a pragmatic subset tokenizer (tokenizer-tests), plus an optional auto-switch mode
 // used by tree construction to approximate the spec's treebuilder-driven state changes.
 fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: maybe<string>, autoSwitch: bool, xmlFixup: bool, scriptingEnabled: bool)
-  : <div,exn> (tokens: list<token>, errors: list<parseerror>)
+  : <div,exn> (tokens: list<tokenloc>, errors: list<parseerror>)
   val cs = preprocess(input, xmlFixup)
   // Precompute 1-based (line,col) for each codepoint in the preprocessed stream.
   fun positions(cs0: vector<char>) : <div,exn> (vector<int>, vector<int>)
@@ -387,6 +389,22 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
     (vector/list/vector(ls.reverse), vector/list/vector(cs2.reverse))
 
   val (pos-line, pos-col) = positions(cs)
+
+  fun clamp-pos(at: int) : <div,exn> int
+    if cs.length <= 0 then 0
+    elif at < 0 then 0
+    elif at >= cs.length then cs.length - 1
+    else at
+
+  fun tok-loc(t: token, at: int) : <div,exn> tokenloc
+    if pos-line.length <= 0 || pos-col.length <= 0 then
+      Tokenloc(t, 1, 1)
+    else
+      {
+        val j = clamp-pos(at)
+        Tokenloc(t, pos-line[j], pos-col[j])
+      }
+
   var errs : list<parseerror> := Nil
   fun add-err(code: string, at: int)
     val line = if (at >= 0 && at < pos-line.length) then pos-line[at] else 1
@@ -415,7 +433,7 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
   var temp-buffer : list<char> := Nil  // for rawtext/RCDATA/script end tag matching
 
   // Output
-  var out : list<token> := Nil
+  var out : list<tokenloc> := Nil
   var text-acc : list<char> := Nil
   var comment-acc : list<char> := Nil
   var doctype-open := False
@@ -506,7 +524,7 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
       Cons(Attr(name,_), rest) -> eq-attrname(name, an) || has-attr(an, rest)
   fun flush-text()
     if text-acc != Nil then
-      out := Cons(TokCharacter(string/listchar/string(text-acc.reverse)), out)
+      out := Cons(tok-loc(TokCharacter(string/listchar/string(text-acc.reverse)), cur-pos), out)
       text-acc := Nil
 
   fun emit-token(t: token)
@@ -514,10 +532,10 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
     match t
       TokComment(data) ->
         if xmlFixup then
-          out := Cons(TokComment(sanitize-xml-comment(data)), out)
+          out := Cons(tok-loc(TokComment(sanitize-xml-comment(data)), cur-pos), out)
         else
-          out := Cons(t, out)
-      _ -> out := Cons(t, out)
+          out := Cons(tok-loc(t, cur-pos), out)
+      _ -> out := Cons(tok-loc(t, cur-pos), out)
 
   fun finish-attr()
     if in-attr then
@@ -1466,17 +1484,34 @@ fun tokenize-internal(input: string, initial: tokenizer-state, lastStartTag: may
   if doctype-open then
     emit-doctype()
   flush-text()
-  out := Cons(TokEOF, out)
+  val eof-at = if cs.length <= 0 then 0 else cs.length - 1
+  out := Cons(tok-loc(TokEOF, eof-at), out)
   (out.reverse, errs.reverse)
+
+fun strip-loc(ts: list<tokenloc>) : list<token>
+  ts.map(fn(tl){
+    match tl
+      Tokenloc(t, _l, _c) -> t
+  })
+
+pub fun tokenize-with-loc(input: string, initial: tokenizer-state = Data, lastStartTag: maybe<string> = Nothing)
+  : <div,exn> (tokens: list<tokenloc>, errors: list<parseerror>)
+  tokenize-internal(input, initial, lastStartTag, False, False, True)
 
 pub fun tokenize(input: string, initial: tokenizer-state = Data, lastStartTag: maybe<string> = Nothing)
   : <div,exn> (tokens: list<token>, errors: list<parseerror>)
-  tokenize-internal(input, initial, lastStartTag, False, False, True)
+  val (ts, es) = tokenize-with-loc(input, initial, lastStartTag)
+  (strip-loc(ts), es)
+
+pub fun tokenize-xml-with-loc(input: string, initial: tokenizer-state = Data, lastStartTag: maybe<string> = Nothing)
+  : <div,exn> (tokens: list<tokenloc>, errors: list<parseerror>)
+  tokenize-internal(input, initial, lastStartTag, False, True, True)
 
 pub fun tokenize-xml(input: string, initial: tokenizer-state = Data, lastStartTag: maybe<string> = Nothing)
   : <div,exn> (tokens: list<token>, errors: list<parseerror>)
-  tokenize-internal(input, initial, lastStartTag, False, True, True)
+  val (ts, es) = tokenize-xml-with-loc(input, initial, lastStartTag)
+  (strip-loc(ts), es)
 
 pub fun tokenize-for-parse(input: string, initial: tokenizer-state = Data, lastStartTag: maybe<string> = Nothing, scriptingEnabled: bool = True)
-  : <div,exn> (tokens: list<token>, errors: list<parseerror>)
+  : <div,exn> (tokens: list<tokenloc>, errors: list<parseerror>)
   tokenize-internal(input, initial, lastStartTag, True, False, scriptingEnabled)

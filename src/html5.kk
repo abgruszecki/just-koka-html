@@ -36,26 +36,37 @@ fun is-ws-only(s: string) : <div,exn> bool
 
 pub fun parse(html: string, opts: parseoptions = default-parse-options) : <div,exn> parseresult
   val (tokens, errors) = tokenizer/tokenize-for-parse(html, Data, Nothing, opts.scripting-enabled)
-  val (dom, treeErrCount) = treebuilder/build-document(tokens, opts.scripting-enabled)
-  // Tree construction tests only check parse error *counts*; start by matching the common "missing doctype" case.
-  fun saw-leading-doctype(ts: list<tokenizer/token>) : <div,exn> bool
+  val (dom, treeErrs) = treebuilder/build-document(tokens, opts.scripting-enabled)
+
+  // Tree construction tests check parse error counts; for user-facing APIs we also include
+  // a "missing-doctype" error (when no leading doctype is present), with a best-effort location.
+  fun saw-leading-doctype(ts: list<tokenizer/tokenloc>) : <div,exn> bool
     match ts
       Nil -> False
-      Cons(t, rest) ->
+      Cons(Tokenloc(t, _line, _col), rest) ->
         match t
           TokDoctype(_,_,_,_) -> True
           TokComment(_) -> saw-leading-doctype(rest)
           TokCharacter(s) -> if is-ws-only(s) then saw-leading-doctype(rest) else False
           _ -> False
 
-  fun add-n-tree-errors(n: int, acc: list<parseerror>) : <div> list<parseerror>
-    if n <= 0 then acc else add-n-tree-errors(n - 1, Cons(Parseerror("tree-error", 1, 1), acc))
+  fun first-token-loc(ts: list<tokenizer/tokenloc>) : (int, int)
+    match ts
+      Nil -> (1, 1)
+      Cons(Tokenloc(_t, line, col), _rest) -> (line, col)
 
-  val withTree = add-n-tree-errors(treeErrCount, errors)
+  val allErrors = treeErrs ++ errors
   val withMissingDoctype =
-    if saw-leading-doctype(tokens) then withTree
-    else Cons(Parseerror("missing-doctype", 1, 1), withTree)
-  Parseresult(dom, withMissingDoctype.reverse)
+    if saw-leading-doctype(tokens) then allErrors
+    else
+      {
+        val (line, col) = first-token-loc(tokens)
+        Cons(Parseerror("missing-doctype", line, col), allErrors)
+      }
+
+  // Preserve historical ordering (tokenizer then treebuilder-ish) by stable sorting on location later (Milestone 4/cleanup).
+  // For now, just return in encounter order.
+  Parseresult(dom, withMissingDoctype)
 
 pub fun parse-fragment(html: string, fragCtx: fragmentcontext, opts: parseoptions = default-parse-options) : <div,exn> parseresult
   fun lower-ascii(c: char) : char
@@ -84,11 +95,9 @@ pub fun parse-fragment(html: string, fragCtx: fragmentcontext, opts: parseoption
       Data -> Nothing
       _ -> Just(lower-ascii-string(fragCtx.tag.trim))
   val (tokens, errors) = tokenizer/tokenize-for-parse(html, init, last, opts.scripting-enabled)
-  val (dom, treeErrCount) = treebuilder/build-fragment(tokens, fragCtx, opts.scripting-enabled)
-  fun add-n-tree-errors(n: int, acc: list<parseerror>) : <div> list<parseerror>
-    if n <= 0 then acc else add-n-tree-errors(n - 1, Cons(Parseerror("tree-error", 1, 1), acc))
-  val withTree = add-n-tree-errors(treeErrCount, errors)
-  Parseresult(dom, withTree.reverse)
+  val (dom, treeErrs) = treebuilder/build-fragment(tokens, fragCtx, opts.scripting-enabled)
+  val allErrors = treeErrs ++ errors
+  Parseresult(dom, allErrors)
 
 pub val tokenize = tokenizer/tokenize
 
