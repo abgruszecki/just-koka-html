@@ -3151,46 +3151,65 @@ fun run-treebuilder(tokens: list<token>, st0: dstate, scriptingEnabled: bool, fi
               (start-tag(st0, name, attrs, selfClosing), False)
             else
               {
-                val (curNm0, curNs0, _curAttrs) = current-element(st0.stack)
-                val inIntegration =
-                  match curNs0
-                    Svg -> is-svg-html-integration-point(curNm0)
-                    Math -> is-math-text-integration-point(lower-ascii-string(curNm0))
-                    _ -> False
-                val noTable = !has-open(st0.stack, "table")
-                val isTableStruct =
-                  (name == "td" || name == "th" || name == "tr" || is-table-section(name) || name == "table"
-                    || name == "caption" || name == "col" || name == "colgroup")
-
-                if inIntegration && noTable && isTableStruct then
-                  // Approximate "table mode without a table in scope": ignore table-structure tags here.
-                  (add-error(st0), False)
-                elif is-table-cell(name) then
-                  { val st1 = start-tag(st0, name, attrs, selfClosing); (st(st1.stack, InCell, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False) }
-                elif name == "caption" then
+                if has-open(st0.stack, "select")
+                     && (name == "tr" || is-table-section(name) || is-table-cell(name) || name == "caption" || name == "col" || name == "colgroup" || name == "table") then
                   {
-                    // Close the current row and let table-body mode place `<caption>` correctly.
-                    val st1 = end-tag(st0, "tr")
-                    (st(st1.stack, InTableBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True)
+                    // In select-in-table contexts, close the <select> (foster-parented) before processing table-structure tokens.
+                    val stack1 = pop-to-select-foster(st0.stack)
+                    val st1 = st(stack1, InRow, st0.html-inserted, st0.head-inserted, st0.body-inserted, st0.errors)
+                    (st1, True)
                   }
-                elif name == "tr" then
-                  {
-                    // Close the current row before starting a new one.
-                    val st1 = end-tag(st0, "tr")
-                    (st(st1.stack, InTableBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True)
-                  }
-                elif is-table-section(name) || name == "table" then
+                elif name == "select" then
                   {
                     val st1 = add-error(st0)
-                    val st2 = end-tag(st1, "tr")
-                    (st(st2.stack, InTableBody, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors), True)
+                    if foster-needed(st1.stack) then
+                      (start-tag-foster(st1, name, attrs, selfClosing), False)
+                    else
+                      (start-tag(st1, name, attrs, selfClosing), False)
                   }
                 else
                   {
-                    // In row contexts, foreign start tags (like <svg>/<math>) are parse errors but still inserted.
-                    val ns0 = element-ns(st0.stack, name)
-                    val st1 = if is-html-ns(ns0) then st0 else add-error(st0)
-                    (start-tag(st1, name, attrs, selfClosing), False)
+                    val (curNm0, curNs0, _curAttrs) = current-element(st0.stack)
+                    val inIntegration =
+                      match curNs0
+                        Svg -> is-svg-html-integration-point(curNm0)
+                        Math -> is-math-text-integration-point(lower-ascii-string(curNm0))
+                        _ -> False
+                    val noTable = !has-open(st0.stack, "table")
+                    val isTableStruct =
+                      (name == "td" || name == "th" || name == "tr" || is-table-section(name) || name == "table"
+                        || name == "caption" || name == "col" || name == "colgroup")
+
+                    if inIntegration && noTable && isTableStruct then
+                      // Approximate "table mode without a table in scope": ignore table-structure tags here.
+                      (add-error(st0), False)
+                    elif is-table-cell(name) then
+                      { val st1 = start-tag(st0, name, attrs, selfClosing); (st(st1.stack, InCell, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), False) }
+                    elif name == "caption" then
+                      {
+                        // Close the current row and let table-body mode place `<caption>` correctly.
+                        val st1 = end-tag(st0, "tr")
+                        (st(st1.stack, InTableBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True)
+                      }
+                    elif name == "tr" then
+                      {
+                        // Close the current row before starting a new one.
+                        val st1 = end-tag(st0, "tr")
+                        (st(st1.stack, InTableBody, st1.html-inserted, st1.head-inserted, st1.body-inserted, st1.errors), True)
+                      }
+                    elif is-table-section(name) || name == "table" then
+                      {
+                        val st1 = add-error(st0)
+                        val st2 = end-tag(st1, "tr")
+                        (st(st2.stack, InTableBody, st2.html-inserted, st2.head-inserted, st2.body-inserted, st2.errors), True)
+                      }
+                    else
+                      {
+                        // In row contexts, foreign start tags (like <svg>/<math>) are parse errors but still inserted.
+                        val ns0 = element-ns(st0.stack, name)
+                        val st1 = if is-html-ns(ns0) then st0 else add-error(st0)
+                        (start-tag(st1, name, attrs, selfClosing), False)
+                      }
                   }
               }
           TokEndTag(name) ->
